@@ -3,7 +3,7 @@ import requests
 import comfy
 
 
-CHECKPOINTS_DIR = os.path.join(os.getcwd(), "checkpoints")
+CHECKPOINTS_DIR = os.path.join(os.getcwd(), "models/checkpoints")
 
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
@@ -27,7 +27,7 @@ class AnymatixCheckpointLoader:
     DESCRIPTION = "Loads a diffusion model checkpoint, diffusion models are used to denoise latents."
 
     def load_checkpoint(self, ckpt_name):
-        ckpt_path = CHECKPOINTS_DIR
+        ckpt_path = f"{CHECKPOINTS_DIR}/{ckpt_name}"
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
         return out[:3]
 
