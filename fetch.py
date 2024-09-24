@@ -1,4 +1,6 @@
 #%%
+import hashlib
+import json
 import os
 import re
 from typing import Callable,Optional
@@ -8,7 +10,29 @@ import requests
 
 from urllib.parse import urlparse
 
-def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]] = None):    
+def hash_string(input_string):
+    # Encode the string to bytes
+    encoded_string = input_string.encode()
+
+    # Create a SHA-256 hash object
+    hash_object = hashlib.sha256(encoded_string)
+
+    # Return the hexadecimal digest of the hash
+    return hash_object.hexdigest()
+
+def download_file(url,dir,store,callback: Optional[Callable[[int,Optional[int]],None]] = None):   
+    
+    h = hash_string(url)
+    store_dir = os.path.join(store,"downloaded_files")
+    os.makedirs(store_dir,exist_ok=True)
+    store_path = os.path.join(store_dir,f"{h}.json")
+    
+    if (os.path.exists(store_path)):
+        with open(store_path,'r') as contents:
+            data = json.load(contents)
+            if "file_name" in data and os.path.exists(os.path.join(dir,data["file_name"])):
+                return data["file_name"]
+
     with requests.Session() as session:
         parsed_url = urlparse(url)
         file_name = parsed_url.path.split('/')[-1].split('?')[0]
@@ -49,4 +73,7 @@ def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]]
                                 if callback:
                                     callback(downloaded_size,file_size)
 
+        data = { "file_name": file_name, "url": url }
+        with open(store_path, 'w') as file:
+            json.dump(data, file, indent=4)
         return file_name

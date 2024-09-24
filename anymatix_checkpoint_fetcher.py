@@ -4,6 +4,7 @@ import folder_paths  # type: ignore
 from .fetch import download_file
 
 CHECKPOINTS_DIR =  os.path.join(folder_paths.models_dir, "checkpoints")
+STORE = os.path.join(folder_paths.user_directory,"anymatix")
 
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
@@ -54,6 +55,6 @@ class AnymatixCheckpointFetcher:
         print(f"Downloading {model_name} from {model_url} to {model_path}")   
         
         pbar = comfy.utils.ProgressBar(100)  
-        model_name = download_file(url=model_url,dir=CHECKPOINTS_DIR,callback=lambda x,y: pbar.update_absolute(x,y))                           
+        model_name = download_file(url=model_url,store=STORE,dir=CHECKPOINTS_DIR,callback=lambda x,y: pbar.update_absolute(x,y))                           
         return(model_name,)
     
