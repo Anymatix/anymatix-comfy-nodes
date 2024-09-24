@@ -1,3 +1,5 @@
+import os
+
 from .anymatix_checkpoint_fetcher import AnymatixCheckpointFetcher, AnymatixCheckpointLoader
 
 NODE_CLASS_MAPPINGS = {
