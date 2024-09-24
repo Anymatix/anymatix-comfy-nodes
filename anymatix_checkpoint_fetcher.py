@@ -1,10 +1,9 @@
 import os
-import requests
 import comfy
 import folder_paths 
 from .fetch import download_file
 
-CHECKPOINTS_DIR = os.path.join(os.getcwd(), "models/checkpoints")
+CHECKPOINTS_DIR =  os.path.join(folder_paths.models_dir, "checkpoints")
 
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
@@ -47,13 +46,13 @@ class AnymatixCheckpointFetcher:
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
 
-    def download_model(self, model_url):
+    def download_model(self, model_url):        
         model_name = "TEST.safetensors"
         # Destination path for the downloaded model
         model_path = os.path.join(CHECKPOINTS_DIR, model_name)
 
         # Download the model file from the provided URL
         print(f"Downloading {model_name} from {model_url} to {model_path}")     
-        model_name = download_file(url=model_url,dir=CHECKPOINTS_DIR,callback=lambda x,y: print(f"Progress: {x/y:.2f}"))                           
+        model_name = download_file(url=model_url,dir=CHECKPOINTS_DIR)                           
         return(model_name,)
     
