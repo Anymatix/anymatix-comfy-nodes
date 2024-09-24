@@ -40,7 +40,7 @@ def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]]
                     
                     downloaded_size = local_file_size
                     with tqdm(total=file_size,initial=local_file_size) as progress_bar:
-                        for chunk in tqdm(response_2.iter_content(chunk_size=8192)):
+                        for chunk in response_2.iter_content(chunk_size=8192):
                             if (chunk):
                                 file.write(chunk)
                                 l=len(chunk)

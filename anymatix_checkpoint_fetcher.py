@@ -1,6 +1,6 @@
 import os
-import comfy
-import folder_paths 
+import comfy # type: ignore
+import folder_paths  # type: ignore
 from .fetch import download_file
 
 CHECKPOINTS_DIR =  os.path.join(folder_paths.models_dir, "checkpoints")
@@ -31,7 +31,6 @@ class AnymatixCheckpointLoader:
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
         return out[:3]
 
-
 # Define the custom node class
 class AnymatixCheckpointFetcher:
     @classmethod
@@ -52,7 +51,9 @@ class AnymatixCheckpointFetcher:
         model_path = os.path.join(CHECKPOINTS_DIR, model_name)
 
         # Download the model file from the provided URL
-        print(f"Downloading {model_name} from {model_url} to {model_path}")     
-        model_name = download_file(url=model_url,dir=CHECKPOINTS_DIR)                           
+        print(f"Downloading {model_name} from {model_url} to {model_path}")   
+        
+        pbar = comfy.utils.ProgressBar(100)  
+        model_name = download_file(url=model_url,dir=CHECKPOINTS_DIR,callback=lambda x,y: pbar.update_absolute(x,y))                           
         return(model_name,)
     
