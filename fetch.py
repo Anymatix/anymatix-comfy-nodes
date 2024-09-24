@@ -8,7 +8,7 @@ import requests
 
 from urllib.parse import urlparse
 
-def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]]):    
+def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]] = None):    
     with requests.Session() as session:
         parsed_url = urlparse(url)
         file_name = parsed_url.path.split('/')[-1].split('?')[0]
@@ -37,12 +37,16 @@ def download_file(url,dir,callback: Optional[Callable[[int,Optional[int]],None]]
             with session.get(url, headers=headers,allow_redirects=True, stream=True) as response_2: # TODO: what if "Range" is not accepted?
                 response_2.raise_for_status()
                 with open(file_path, 'ab') as file:
+                    
                     downloaded_size = local_file_size
-                    for chunk in tqdm(response_2.iter_content(chunk_size=8192)):
-                        if (chunk):
-                            file.write(chunk)
-                            downloaded_size+=len(chunk)
-                            if callback:
-                                callback(downloaded_size,file_size)
+                    with tqdm(total=file_size,initial=local_file_size) as progress_bar:
+                        for chunk in tqdm(response_2.iter_content(chunk_size=8192)):
+                            if (chunk):
+                                file.write(chunk)
+                                l=len(chunk)
+                                downloaded_size+=l
+                                progress_bar.update(l)
+                                if callback:
+                                    callback(downloaded_size,file_size)
 
         return file_name
