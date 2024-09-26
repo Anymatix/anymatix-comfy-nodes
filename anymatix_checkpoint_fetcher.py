@@ -38,7 +38,7 @@ class AnymatixCheckpointFetcher:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),                
+                "url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),                
             }
         }
 
