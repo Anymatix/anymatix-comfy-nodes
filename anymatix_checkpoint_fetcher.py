@@ -46,15 +46,8 @@ class AnymatixCheckpointFetcher:
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
 
-    def download_model(self, url):        
-        model_name = "TEST.safetensors"
-        # Destination path for the downloaded model
-        model_path = os.path.join(CHECKPOINTS_DIR, model_name)
-
-        # Download the model file from the provided URL
-        print(f"Downloading {model_name} from {url} to {model_path}")   
-        
-        pbar = comfy.utils.ProgressBar(100)  
+    def download_model(self, url):                
+        pbar = comfy.utils.ProgressBar(1)  
         model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=lambda x,y: pbar.update_absolute(x,y))                           
         return(model_name,)
     
