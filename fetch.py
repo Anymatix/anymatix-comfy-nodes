@@ -11,21 +11,15 @@ import requests
 from urllib.parse import urlparse
 
 def hash_string(input_string):
-    # Encode the string to bytes
     encoded_string = input_string.encode()
-
-    # Create a SHA-256 hash object
     hash_object = hashlib.sha256(encoded_string)
-
-    # Return the hexadecimal digest of the hash
     return hash_object.hexdigest()
 
 def download_file(url,dir,store,callback: Optional[Callable[[int,Optional[int]],None]] = None):   
     
-    h = hash_string(url)
-    store_dir = os.path.join(store,"downloaded_files")
-    os.makedirs(store_dir,exist_ok=True)
-    store_path = os.path.join(store_dir,f"{h}.json")
+    url_hash = hash_string(url)
+    os.makedirs(store,exist_ok=True)
+    store_path = os.path.join(store,f"{url_hash}.json")
     
     if (os.path.exists(store_path)):
         with open(store_path,'r') as contents:
@@ -48,7 +42,9 @@ def download_file(url,dir,store,callback: Optional[Callable[[int,Optional[int]],
                     file_name = filename_match.group(1)
             if "Content-Length" in response.headers:
                 file_size = int(response.headers.get('Content-Length', 0))            
-            
+        
+        file_name = f"{url_hash}_{file_name}"
+        
         file_path=os.path.join(dir,file_name)
             
         if os.path.exists(file_path):

@@ -1,10 +1,12 @@
 import os
-import comfy # type: ignore
-import folder_paths  # type: ignore
+import comfy
+import comfy.sd
+import comfy.utils
+import folder_paths 
 from .fetch import download_file
 
 CHECKPOINTS_DIR =  os.path.join(folder_paths.models_dir, "checkpoints")
-STORE = os.path.join(folder_paths.user_directory,"anymatix")
+STORE = CHECKPOINTS_DIR #os.path.join(folder_paths.user_directory,"anymatix")
 
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
@@ -28,7 +30,7 @@ class AnymatixCheckpointLoader:
     DESCRIPTION = "Loads a diffusion model checkpoint, diffusion models are used to denoise latents."
 
     def load_checkpoint(self, ckpt_name):
-        ckpt_path = f"{CHECKPOINTS_DIR}/{ckpt_name}"
+        ckpt_path = f"{CHECKPOINTS_DIR}/{ckpt_name}"                                
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
         return out[:3]
 
@@ -47,7 +49,18 @@ class AnymatixCheckpointFetcher:
     CATEGORY = "Anymatix"
 
     def download_model(self, url):                
-        pbar = comfy.utils.ProgressBar(1)  
-        model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=lambda x,y: pbar.update_absolute(x,y))                           
+        pbar = comfy.utils.ProgressBar(1000)
+        progress = 0        
+        pbar.update_absolute(progress,1000)
+        
+        def callback(x,y): 
+            import math           
+            new_progress = round(1000*x/y)
+            nonlocal progress
+            if (new_progress != progress):
+                progress = new_progress
+                pbar.update_absolute(progress,1000)
+                
+        model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=callback)                           
         return(model_name,)
     
