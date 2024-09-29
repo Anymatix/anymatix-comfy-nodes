@@ -22,8 +22,9 @@ routes = PromptServer.instance.routes
 
 allowed_dirs=["output","input","models"] 
 
-@routes.get("/{basedir}/{filename:.+}")
+@routes.get("/anymatix/{basedir}/{filename:.+}")
 async def serve_file(request):
+    print("SERVING FILE",request.url)
     response = web.Response(text="File not found", status=404)
     
     basedir = request.match_info['basedir']
@@ -36,9 +37,9 @@ async def serve_file(request):
     return response
     
 resource_extensions=[".ckpt",".safetensors"]
-@routes.get("/resources")
+
+@routes.get("/resources") # TODO -> anymatix/resources
 async def serve_resources(request):
-    print("resources?")
     md = folder_paths.models_dir
     def find(path):
         return os.path.join(md,path)
