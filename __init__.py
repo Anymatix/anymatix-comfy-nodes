@@ -1,4 +1,5 @@
 import os
+import socket
 import folder_paths
 
 from .anymatix_checkpoint_fetcher import AnymatixCheckpointFetcher, AnymatixCheckpointLoader
@@ -29,16 +30,19 @@ async def serve_file(request):
     
     basedir = request.match_info['basedir']
     
-    if basedir in allowed_dirs:
+    if basedir in allowed_dirs:        
+        # TODO: the check on getcwd is plain wrong (if the cwd is not what I expected). Determine from the current script?        
         file_path = os.path.abspath(f"{basedir}/{request.match_info['filename']}")    
         if file_path.startswith(f"{os.path.abspath(os.getcwd())}/{basedir}") and os.path.isfile(file_path) and os.access(file_path, os.R_OK):
             response = web.FileResponse(file_path)
-        
+        else:
+            print("****",f"{os.path.abspath(os.getcwd())}/{basedir}",os.path.isfile(file_path),os.access(file_path, os.R_OK))
+            
     return response
     
 resource_extensions=[".ckpt",".safetensors"]
 
-@routes.get("/resources") # TODO -> anymatix/resources
+@routes.get("/anymatix/resources") # TODO -> anymatix/resources
 async def serve_resources(request):
     md = folder_paths.models_dir
     def find(path):
@@ -49,6 +53,6 @@ async def serve_resources(request):
     }
     return web.json_response(resources)
     
-
+print(f"anymatix running on host {socket.gethostname()}")
     
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
