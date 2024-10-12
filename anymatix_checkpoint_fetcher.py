@@ -1,4 +1,7 @@
 import os
+import re
+
+import requests
 import comfy
 import comfy.sd
 import comfy.utils
@@ -60,7 +63,24 @@ class AnymatixCheckpointFetcher:
             if (new_progress != progress):
                 progress = new_progress
                 pbar.update_absolute(progress,1000)
-                
-        model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=callback)                           
+        
+        def expand_info_civitai(url):            
+            # get the model id from the url using a regex that matches the first /.../ after https://civitai.com/api/download/models 
+            pattern = r'https://civitai\.com/api/download/models/([^/]+)'
+            match = re.search(pattern, url)
+            if match:
+                model_id = match.group(1)
+            else:
+                return None            
+            model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
+            with requests.Session() as session:
+                return requests.get(model_info_url,allow_redirects=True).json()
+            
+        def expand_info(url):
+            if url.startswith("https://civitai.com/api/download/models"):
+                return expand_info_civitai(url)
+            return None
+        
+        model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=callback,expand_info=expand_info)                           
         return(model_name,)
     

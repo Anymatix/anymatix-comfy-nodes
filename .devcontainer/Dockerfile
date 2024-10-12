@@ -1,3 +1,3 @@
-FROM docker.io/vincenzoml/anymatix:latest
-RUN adduser anymatix
-USER anymatix
+FROM docker.io/vincenzoml/hybrid-test:latest
+RUN adduser hybrid
+USER hybrid
