@@ -84,3 +84,4 @@ class AnymatixCheckpointFetcher:
         model_name = download_file(url=url,store=STORE,dir=CHECKPOINTS_DIR,callback=callback,expand_info=expand_info)                           
         return(model_name,)
     
+

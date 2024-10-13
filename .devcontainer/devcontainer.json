@@ -4,7 +4,8 @@
     "dockerfile": "Dockerfile"
   },
   "runArgs": [
-    "--gpus=all"
+    "--gpus=all",
+    "--network=host"
     // "--device",
     // "nvidia.com/gpu=all",
     // "--userns=keep-id"
