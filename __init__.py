@@ -1,3 +1,5 @@
+import json
+import folder_paths
 from aiohttp import web
 import os
 import socket
@@ -45,9 +47,26 @@ async def serve_file(request):
 # resource_extensions = [".ckpt", ".safetensors"]
 
 
-# @routes.get("/anymatix/resources")
-# async def serve_resources(_request):
-    
+@routes.get("/anymatix/resources")
+async def serve_resources(_request):
+    json_files = (os.path.join(dirpath, filename)  # .removeprefix(folder_paths.models_dir)
+                  for dirpath, _, filenames in os.walk(folder_paths.models_dir)
+                  for filename in filenames
+                  if filename.endswith(".json"))
+
+    def get_json_data(path: str) -> dict:
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    def get_type(path: str) -> str:
+        return path.removeprefix(folder_paths.models_dir).split(os.sep)[1]
+
+    contents = map(lambda x: {"type": get_type(
+        x), "data": get_json_data(x)}, json_files)
+
+    result = list(contents)
+    return web.json_response(result)
+
 #     def get_json_data(path: str) -> dict:
 #         with open(find(path), 'r') as f:
 #             return json.load(f)
@@ -57,7 +76,6 @@ async def serve_file(request):
 #         if "file_name" in data:
 #             return data["file_name"]
 #         return None
-
 
 
 #     for (_,_,file) in os.walk(folder_paths.models_dir):
@@ -94,7 +112,7 @@ async def serve_file(request):
 
 #         references = {filename: json_file for json_file in json_files if (
 #             filename := get_filename_from_json(json_file)) if filename is not None}
-        
+
 #         files = get_files(path)
 
 #         print("files",path,list(files))
