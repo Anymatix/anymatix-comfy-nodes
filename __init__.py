@@ -1,4 +1,5 @@
 import json
+from typing import Dict
 import folder_paths
 from aiohttp import web
 import os
@@ -49,7 +50,7 @@ async def serve_file(request):
 
 @routes.get("/anymatix/resources")
 async def serve_resources(_request):
-    json_files = (os.path.join(dirpath, filename)  # .removeprefix(folder_paths.models_dir)
+    json_files = (os.path.join(dirpath, filename)  
                   for dirpath, _, filenames in os.walk(folder_paths.models_dir)
                   for filename in filenames
                   if filename.endswith(".json"))
@@ -61,68 +62,21 @@ async def serve_resources(_request):
     def get_type(path: str) -> str:
         return path.removeprefix(folder_paths.models_dir).split(os.sep)[1]
 
-    contents = map(lambda x: {"type": get_type(
-        x), "data": get_json_data(x)}, json_files)
+    def get_contents(path: str):
+        data = get_json_data(path)
+        type = get_type(path)
+        file_path = path.removeprefix(os.path.join(folder_paths.models_dir,type))
+        return (data,type,file_path)
 
-    result = list(contents)
+    contents = map(get_contents, json_files)
+
+    result : Dict[str,list]= {}
+
+    for (data,type,file_path) in contents:        
+        if type in result:
+            result[type].append(data)
+        else:
+            result[type] = [data]
+                
     return web.json_response(result)
 
-#     def get_json_data(path: str) -> dict:
-#         with open(find(path), 'r') as f:
-#             return json.load(f)
-
-#     def get_filename_from_json(path: str):
-#         data = get_json_data(path)
-#         if "file_name" in data:
-#             return data["file_name"]
-#         return None
-
-
-#     for (_,_,file) in os.walk(folder_paths.models_dir):
-#         print("FULE",file)
-
-#     result = []
-#     return web.json_response(result)
-
-#     resources = {}
-
-#     def find(path: str):
-#         return os.path.join(md, path)
-
-#     def get_json_data(path: str) -> dict:
-#         with open(find(path), 'r') as f:
-#             return json.load(f)
-
-#     def get_filename_from_json(path: str):
-#         data = get_json_data(path)
-#         if "file_name" in data:
-#             return data["file_name"]
-#         return None
-
-#     def get_files(path: str):
-#         return (f for f in os.listdir(find(path)) if any(f.endswith(ext) for ext in resource_extensions))
-
-#     def get_json_files(path):
-#         return [os.path.join(path, f) for f in os.listdir(find(path)) if f.endswith(".json")]
-
-#     def get_resources(path):
-#         print("get_resources", path)
-#         json_files = get_json_files(path)
-#         print("json_files", json_files)
-
-#         references = {filename: json_file for json_file in json_files if (
-#             filename := get_filename_from_json(json_file)) if filename is not None}
-
-#         files = get_files(path)
-
-#         print("files",path,list(files))
-#         result = list(map(lambda file: get_json_data(references[file]) if file in references else file, files))
-#         print("result",result) if path == "checkpoints" else None
-#         return result
-
-#     for dir in os.listdir(md):
-#         if os.path.isdir(find(dir)):
-#             resources[dir] = get_resources(os.path.join(md,dir))
-
-
-#     return web.json_response(resources)

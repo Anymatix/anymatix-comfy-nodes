@@ -57,16 +57,25 @@ def download_file(url, dir, store, callback: Optional[Callable[[int, Optional[in
 
     with requests.Session() as session:
 
+        
         if (os.path.exists(store_path)):
             with open(store_path, 'r') as contents:
                 data.update(json.load(contents))
-        else:
-            data.update(fetch_headers(url, session))
+        else:   
+            data.update(fetch_headers(url, session))                        
             if data["file_name"] is None:
-                data["file_name"] = f"{file_name_default}"
+                data["file_name"] = f"{file_name_default}"                
             f = data["file_name"]
-            x = f.rsplit(".")            
-            data["file_name"] = f"{x[0]}_{url_hash}" + (f".{x[1]}" if len(x) > 1 else "")
+            x = f.rsplit(".")
+            data["name"] = x[0]
+            data["file_name"] = f"{x[0]}_{url_hash}" + (f".{x[1]}" if len(x) > 1 else "")            
+            if expand_info:
+                info = expand_info(url)
+                if info is not None:
+                    data["data"] = info
+            with open(store_path, 'w') as file:
+                json.dump(data, file, indent=4)
+
 
         file_path = os.path.join(dir, data["file_name"])
         local_file_size = 0
@@ -91,14 +100,7 @@ def download_file(url, dir, store, callback: Optional[Callable[[int, Optional[in
                             callback(downloaded_size, data["file_size"])
                 fetch(url, session, cb, local_file_size)
 
-        if expand_info:
-            info = expand_info(url)
-            if info is not None:
-                data.update(info)
 
-        with open(store_path, 'w') as file:
-            json.dump(data, file, indent=4)
-            
         print("ABOUT TO RETURN",data["file_name"])
 
         return data["file_name"]
