@@ -5,6 +5,7 @@ from aiohttp import web
 import os
 import socket
 from server import PromptServer
+import app
 
 from .anymatix_checkpoint_fetcher import AnymatixCheckpointFetcher, AnymatixCheckpointLoader
 
@@ -26,6 +27,9 @@ allowed_dirs = ["output", "input", "models"]
 
 routes = PromptServer.instance.routes
 
+@routes.get('/anymatix/log')
+async def get_log(request):
+    return web.json_response(app.logger.get_logs())
 
 @routes.get("/anymatix/{basedir}/{filename:.+}")
 async def serve_file(request):
