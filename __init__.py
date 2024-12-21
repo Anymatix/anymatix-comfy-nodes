@@ -1,7 +1,9 @@
 import json
 from typing import Dict
+import app.logger
 import folder_paths
 from aiohttp import web
+import logging
 import os
 import socket
 from server import PromptServer
@@ -22,14 +24,31 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
 
-print(f"anymatix running on host {socket.gethostname()}")
+print(f"anymatix: running on host {socket.gethostname()}")
 allowed_dirs = ["output", "input", "models"]
 
 routes = PromptServer.instance.routes
 
 @routes.get('/anymatix/log')
 async def get_log(request):
-    return web.json_response(app.logger.get_logs())
+    return web.json_response(list(app.logger.get_logs()))
+
+from .expunge import * 
+    
+outdir = f"{folder_paths.output_directory}/anymatix/results"
+@routes.post('/anymatix/expunge')
+async def serve_expunge(request):    
+    print("anymatix: expunging cache")
+    data = await request.json()
+    keep : list[str] = data['keep']
+    await expunge(keep,outdir)    
+    return web.Response(status=200)
+
+@routes.get('/anymatix/cache_size')
+async def serve_cache_size(request):    
+    result = await count_outputs(outdir)    
+    return web.json_response(result)
+
 
 @routes.get("/anymatix/{basedir}/{filename:.+}")
 async def serve_file(request):
