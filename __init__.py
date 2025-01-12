@@ -1,3 +1,5 @@
+from .fetch import delete_files
+from .expunge import *
 import json
 from typing import Dict
 import app.logger
@@ -29,25 +31,38 @@ allowed_dirs = ["output", "input", "models"]
 
 routes = PromptServer.instance.routes
 
+
 @routes.get('/anymatix/log')
 async def get_log(request):
     return web.json_response(list(app.logger.get_logs()))
 
-from .expunge import * 
-    
+
 outdir = f"{folder_paths.output_directory}/anymatix/results"
+
+
 @routes.post('/anymatix/expunge')
-async def serve_expunge(request):    
+async def serve_expunge(request):
     print("anymatix: expunging cache")
     data = await request.json()
-    keep : list[str] = data['keep']
-    await expunge(keep,outdir)    
+    keep: list[str] = data['keep']
+    await expunge(keep, outdir)
     return web.Response(status=200)
 
+
 @routes.get('/anymatix/cache_size')
-async def serve_cache_size(request):    
-    result = await count_outputs(outdir)    
+async def serve_cache_size(request):
+    result = await count_outputs(outdir)
     return web.json_response(result)
+
+
+@routes.post("/anymatix/delete_resource")
+async def serve_delete(request):
+    print("anymatix: deleting resource")
+    data = await request.json()
+    print("anymatix:", data)
+    url = data['url']
+    delete_files(url, folder_paths.models_dir)
+    return web.Response(status=200)
 
 
 @routes.get("/anymatix/{basedir}/{filename:.+}")
@@ -73,7 +88,7 @@ async def serve_file(request):
 
 @routes.get("/anymatix/resources")
 async def serve_resources(_request):
-    json_files = (os.path.join(dirpath, filename)  
+    json_files = (os.path.join(dirpath, filename)
                   for dirpath, _, filenames in os.walk(folder_paths.models_dir)
                   for filename in filenames
                   if filename.endswith(".json"))
@@ -88,18 +103,18 @@ async def serve_resources(_request):
     def get_contents(path: str):
         data = get_json_data(path)
         type = get_type(path)
-        file_path = path.removeprefix(os.path.join(folder_paths.models_dir,type))
-        return (data,type,file_path)
+        file_path = path.removeprefix(
+            os.path.join(folder_paths.models_dir, type))
+        return (data, type, file_path)
 
     contents = map(get_contents, json_files)
 
-    result : Dict[str,list]= {}
+    result: Dict[str, list] = {}
 
-    for (data,type,file_path) in contents:        
+    for (data, type, file_path) in contents:
         if type in result:
             result[type].append(data)
         else:
             result[type] = [data]
-                
-    return web.json_response(result)
 
+    return web.json_response(result)

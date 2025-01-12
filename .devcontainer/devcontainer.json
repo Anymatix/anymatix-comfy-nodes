@@ -4,10 +4,10 @@
     "dockerfile": "Dockerfile"
   },
   "runArgs": [
-    "--gpus=all",
-    "--network=host"
-    // "--device",
-    // "nvidia.com/gpu=all",
+    // "--gpus=all",
+    "--network=host",
+    "--device",
+    "nvidia.com/gpu=all",
     // "--userns=keep-id"
   ],
   "mounts": [
@@ -31,7 +31,8 @@
         "bradlc.vscode-tailwindcss",
         "ms-python.autopep8",
         "viveksjain.remreload",
-        "csstools.postcss"
+        "csstools.postcss",
+        "Codeium.codeium"
       ]
     }
   }

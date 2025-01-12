@@ -47,35 +47,48 @@ def fetch(url: str, session: Session, callback: Callable[[bytes], None], local_f
             callback(item)
 
 
-def download_file(url, dir, store, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None):
+def delete_files(url, dir):
+    print("delete files", url)
     url_hash = hash_string(url)
-    os.makedirs(store, exist_ok=True)
-    store_path = os.path.join(store, f"{url_hash}.json")
+    for root, _, files in os.walk(dir):
+        for f in files:
+            print("examining", f)
+            if url_hash in f:
+                print("deleting", f)
+                file_path = os.path.join(root, f)
+                print("deleting", file_path)
+                os.remove(file_path)
+
+
+def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None):
+    print("download file", url)
+    url_hash = hash_string(url)
+    os.makedirs(dir, exist_ok=True)
+    store_path = os.path.join(dir, f"{url_hash}.json")
     parsed_url = urlparse(url)
     file_name_default = parsed_url.path.split('/')[-1].split('?')[0]
     data = {"url": url}
 
     with requests.Session() as session:
 
-        
         if (os.path.exists(store_path)):
             with open(store_path, 'r') as contents:
                 data.update(json.load(contents))
-        else:   
-            data.update(fetch_headers(url, session))                        
+        else:
+            data.update(fetch_headers(url, session))
             if data["file_name"] is None:
-                data["file_name"] = f"{file_name_default}"                
+                data["file_name"] = f"{file_name_default}"
             f = data["file_name"]
             x = f.rsplit(".")
             data["name"] = x[0]
-            data["file_name"] = f"{x[0]}_{url_hash}" + (f".{x[1]}" if len(x) > 1 else "")            
+            data["file_name"] = f"{x[0]}_{url_hash}" + \
+                (f".{x[1]}" if len(x) > 1 else "")
             if expand_info:
                 info = expand_info(url)
                 if info is not None:
                     data["data"] = info
             with open(store_path, 'w') as file:
                 json.dump(data, file, indent=4)
-
 
         file_path = os.path.join(dir, data["file_name"])
         local_file_size = 0
@@ -100,7 +113,32 @@ def download_file(url, dir, store, callback: Optional[Callable[[int, Optional[in
                             callback(downloaded_size, data["file_size"])
                 fetch(url, session, cb, local_file_size)
 
-
-        print("ABOUT TO RETURN",data["file_name"])
+        print("Model name:", data["file_name"])
 
         return data["file_name"]
+
+
+def expand_info_civitai(url):
+    # get the model id from the url using a regex that matches the first /.../ after https://civitai.com/api/download/models
+    pattern = r'https://civitai\.com/api/download/models/([^/]+)'
+    match = re.search(pattern, url)
+    if match:
+        model_id = match.group(1)
+    else:
+        return None
+    model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
+    with requests.Session() as session:
+        return requests.get(model_info_url, allow_redirects=True).json()
+
+
+def expand_info(url):
+    if url.startswith("https://civitai.com/api/download/models"):
+        return expand_info_civitai(url)
+    return None
+
+
+if __name__ == "__main__":
+    url = "https://civitai.com/api/download/models/128713"
+    dir = "tmp"
+    model_name = download_file(url, dir, print, expand_info)
+    print(f"downloaded model {model_name}")
