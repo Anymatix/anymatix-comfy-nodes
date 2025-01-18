@@ -37,6 +37,65 @@ async def get_log(request):
     return web.json_response(list(app.logger.get_logs()))
 
 
+@routes.post('/anymatix/uploadAsset')
+async def upload_asset(request):
+    reader = await request.multipart()
+
+    hash_value = None
+    file_extension = None
+
+    # Iterate over the parts in the multipart form
+    async for part in reader:
+        if part.name == "hash":  # Retrieve the 'hash' field
+            hash_value = await part.text()
+        elif part.name == "extension":  # Retrieve the 'extension' field
+            file_extension = await part.text()
+        elif part.name == "file":  # Handle the file upload
+            file_path = os.path.join(
+                folder_paths.input_directory, f"{hash_value}.{file_extension}")
+            with open(file_path, "wb") as output_file:
+                while chunk := await part.read_chunk():  # Read file in chunks
+                    output_file.write(chunk)
+# TODO: choose a temporary file name first, then check file hash, then rename
+
+    # This is done from the client in js:
+    # const formData = new FormData()
+    # formData.append('file', file)
+    # formData.append('hash', h)
+    # file = data.get('file')
+
+    # if not file:
+    #     return web.Response(status=400, text="File is required")
+
+    # extension = data.get('extension')
+    # if not extension:
+    #     return web.Response(status=400, text="extension is required")
+
+    # import hashlib
+
+    # # Compute the SHA256 hash of the file
+    # file_hash = hashlib.sha256()
+    # while True:
+    #     chunk = file.read(8192)
+    #     if not chunk:
+    #         break
+    #     file_hash.update(chunk)
+    # hash_value = file_hash.hexdigest()
+
+    # file_path = os.path.join(
+    #     folder_paths.input_directory, f"{hash_value}.{extension}")
+
+    # with open(file_path, 'wb') as f:
+    #     file.seek(0)
+    #     while True:
+    #         chunk = file.read(8192)
+    #         if not chunk:
+    #             break
+    #         f.write(chunk)
+
+    return web.Response(status=200)
+
+
 outdir = f"{folder_paths.output_directory}/anymatix/results"
 
 
