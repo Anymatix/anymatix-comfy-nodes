@@ -1,0 +1,39 @@
+{
+  "name": "test-genai",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    // "--gpus=all",
+    "--network=host",
+    "--device",
+    "nvidia.com/gpu=all",
+    // "--userns=keep-id"
+  ],
+  "mounts": [
+    {
+      "source": "/",
+      "target": "/parent",
+      "type": "bind"
+    }
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "kuba-p.glsl-lsp",
+        "Tyriar.luna-paint",
+        "ms-toolsai.jupyter",
+        "svelte.svelte-vscode",
+        "ms-azuretools.vscode-docker",
+        "eamodio.gitlens",
+        "netcorext.uuid-generator",
+        "bradlc.vscode-tailwindcss",
+        "ms-python.autopep8",
+        "viveksjain.remreload",
+        "csstools.postcss",
+        "Codeium.codeium"
+      ]
+    }
+  }
+}
