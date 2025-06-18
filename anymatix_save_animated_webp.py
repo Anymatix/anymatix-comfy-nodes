@@ -53,8 +53,6 @@ class AnymatixSaveAnimatedWEBP:
             lossless: Whether to use lossless compression
             quality: WEBP quality (0-100)
             method: Compression method
-            filename_counter_format: Format string for counter (e.g., "_{counter:05}_" or "_{counter:03d}")
-            use_original_filename: If True, use filename_prefix as-is without counter
             num_frames: Number of frames per file (0 = all frames in one file)
             prompt: Prompt metadata
             extra_pnginfo: Extra PNG info metadata
