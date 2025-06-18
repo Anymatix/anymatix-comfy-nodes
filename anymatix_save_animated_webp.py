@@ -8,9 +8,8 @@ from comfy.cli_args import args
 
 class AnymatixSaveAnimatedWEBP:
     """
-    Custom SaveAnimatedWEBP node that provides better filename control.
-    Based on ComfyUI's SaveAnimatedWEBP but allows configurable filename patterns
-    without the hardcoded counter suffix.
+    Custom SaveAnimatedWEBP node that uses the exact filename provided.
+    Based on ComfyUI's SaveAnimatedWEBP but without any counter suffixes.
     """
     
     def __init__(self):
@@ -29,8 +28,6 @@ class AnymatixSaveAnimatedWEBP:
                 "lossless": ("BOOLEAN", {"default": True}),
                 "quality": ("INT", {"default": 80, "min": 0, "max": 100}),
                 "method": (list(cls.methods.keys()),),
-                "filename_counter_format": ("STRING", {"default": "_{counter:05}_", "multiline": False}),
-                "use_original_filename": ("BOOLEAN", {"default": False}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -41,21 +38,9 @@ class AnymatixSaveAnimatedWEBP:
     CATEGORY = "Anymatix"
 
     def save_images(self, images, fps, filename_prefix, lossless, quality, method, 
-                   filename_counter_format="_{counter:05}_", use_original_filename=False,
-                   num_frames=0, prompt=None, extra_pnginfo=None):
+                   prompt=None, extra_pnginfo=None):
         """
-        Save images as animated WEBP with configurable filename format.
-        
-        Args:
-            images: Image tensor batch
-            fps: Frame rate for animation
-            filename_prefix: Base filename prefix
-            lossless: Whether to use lossless compression
-            quality: WEBP quality (0-100)
-            method: Compression method
-            num_frames: Number of frames per file (0 = all frames in one file)
-            prompt: Prompt metadata
-            extra_pnginfo: Extra PNG info metadata
+        Save images as animated WEBP with simple filename.
         """
         method = self.methods.get(method, 4)
         
@@ -85,96 +70,34 @@ class AnymatixSaveAnimatedWEBP:
                     metadata[inital_exif] = "{}:{}".format(x, json.dumps(extra_pnginfo[x]))
                     inital_exif -= 1
 
-        if num_frames == 0:
-            num_frames = len(pil_images)
-
-        # Determine filename strategy
-        if use_original_filename:
-            # Use filename_prefix as the exact filename (with .webp extension)
-            if not filename_prefix.endswith('.webp'):
-                filename = f"{filename_prefix}.webp"
-            else:
-                filename = filename_prefix
-            
-            # Save all images as a single animated WEBP
-            file_path = os.path.join(output_path, filename)
-            pil_images[0].save(
-                file_path,
-                save_all=True,
-                duration=int(1000.0/fps),
-                append_images=pil_images[1:],
-                exif=metadata,
-                lossless=lossless,
-                quality=quality,
-                method=method
-            )
-            
-            print(f"Animated WEBP saved to: {file_path}")
-            
-            results.append({
-                "filename": filename,
-                "subfolder": "anymatix/results",
-                "type": self.type
-            })
+        # Use filename_prefix directly as the filename
+        if not filename_prefix.endswith('.webp'):
+            filename = f"{filename_prefix}.webp"
         else:
-            # Use counter-based naming (similar to original but configurable)
-            counter = 1
-            
-            # Find existing files to avoid conflicts
-            existing_files = [f for f in os.listdir(output_path) if f.startswith(filename_prefix) and f.endswith('.webp')]
-            if existing_files:
-                # Extract counter from existing files and start from max + 1
-                counters = []
-                for f in existing_files:
-                    try:
-                        # Try to extract number from filename
-                        base = f[len(filename_prefix):].replace('.webp', '')
-                        if base.startswith('_') and base.endswith('_'):
-                            num_str = base[1:-1]
-                            counters.append(int(num_str))
-                    except:
-                        pass
-                if counters:
-                    counter = max(counters) + 1
-            
-            # Split images into chunks based on num_frames
-            c = len(pil_images)
-            for i in range(0, c, num_frames):
-                try:
-                    # Format the counter according to the format string
-                    counter_str = filename_counter_format.format(counter=counter)
-                except:
-                    # Fallback to default format if formatting fails
-                    counter_str = f"_{counter:05}_"
-                
-                filename = f"{filename_prefix}{counter_str}.webp"
-                file_path = os.path.join(output_path, filename)
-                
-                # Get the chunk of images for this file
-                chunk_images = pil_images[i:i + num_frames]
-                
-                chunk_images[0].save(
-                    file_path,
-                    save_all=True,
-                    duration=int(1000.0/fps),
-                    append_images=chunk_images[1:],
-                    exif=metadata,
-                    lossless=lossless,
-                    quality=quality,
-                    method=method
-                )
-                
-                print(f"Animated WEBP saved to: {file_path}")
-                
-                results.append({
-                    "filename": filename,
-                    "subfolder": "anymatix/results",
-                    "type": self.type
-                })
-                counter += 1
+            filename = filename_prefix
+        
+        # Save all images as a single animated WEBP
+        file_path = os.path.join(output_path, filename)
+        pil_images[0].save(
+            file_path,
+            save_all=True,
+            duration=int(1000.0/fps),
+            append_images=pil_images[1:],
+            exif=metadata,
+            lossless=lossless,
+            quality=quality,
+            method=method
+        )
+        
+        print(f"Animated WEBP saved to: {file_path}")
+        
+        results.append({
+            "filename": filename,
+            "subfolder": "anymatix/results",
+            "type": self.type
+        })
 
-        animated = num_frames != 1
-        return {"ui": {"images": results, "animated": (animated,)}}
+        return {"ui": {"images": results, "animated": (True,)}}
 
 
 # Node export for ComfyUI
