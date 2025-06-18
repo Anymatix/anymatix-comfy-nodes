@@ -139,7 +139,8 @@ class AnymatixSaveAnimatedMP4:
         
         results = []
         
-        if not images or len(images) == 0:
+        # Check if we have images to process
+        if images is None or len(images) == 0:
             print("No frames to save")
             return {"ui": {"images": [], "animated": (True,)}}
         
