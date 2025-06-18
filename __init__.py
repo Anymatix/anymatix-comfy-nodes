@@ -54,7 +54,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixUNETLoader": "Anymatix UNET Loader",
     "AnymatixVAELoader": "Anymatix VAE Loader",
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
-    "ImageToVideo": "Image To Video",
+    "AnymatixImageToVideo": "Anymatix Image To Video",
 }
 
 
