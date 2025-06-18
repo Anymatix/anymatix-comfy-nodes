@@ -1,8 +1,6 @@
 import os
 import numpy as np
-import json
 import folder_paths
-from comfy.cli_args import args
 
 try:
     import cv2
@@ -38,10 +36,8 @@ class AnymatixSaveAnimatedMP4:
                 "output_path": ("STRING", {"default": "anymatix/results", "multiline": False}),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 0.01, "max": 120.0, "step": 0.01}),
-                "quality": ("INT", {"default": 23, "min": 0, "max": 51, "step": 1}),
                 "codec": (list(cls.codecs.keys()), {"default": "libx264"}),
             },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     RETURN_TYPES = ()
@@ -49,8 +45,7 @@ class AnymatixSaveAnimatedMP4:
     OUTPUT_NODE = True
     CATEGORY = "Anymatix"
 
-    def save_images(self, images, output_path, filename_prefix, fps, quality, codec,
-                   prompt=None, extra_pnginfo=None):
+    def save_images(self, images, output_path, filename_prefix, fps, codec):
         """
         Save images as MP4 video with simple filename.
         """
@@ -106,25 +101,6 @@ class AnymatixSaveAnimatedMP4:
         
         # Release the video writer
         video_writer.release()
-        
-        # Save metadata as a separate JSON file if available
-        if not args.disable_metadata and (prompt is not None or extra_pnginfo is not None):
-            metadata = {}
-            if prompt is not None:
-                metadata["prompt"] = prompt
-            if extra_pnginfo is not None:
-                metadata.update(extra_pnginfo)
-            
-            # Save metadata to JSON file with same name as video
-            metadata_filename = filename.replace('.mp4', '_metadata.json')
-            metadata_path = os.path.join(output_path, metadata_filename)
-            
-            try:
-                with open(metadata_path, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                print(f"Metadata saved to: {metadata_path}")
-            except Exception as e:
-                print(f"Warning: Could not save metadata: {e}")
         
         print(f"Animated MP4 saved to: {file_path}")
         
