@@ -26,6 +26,7 @@ from .anymatix_checkpoint_fetcher import (
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
+from .anymatix_save_animated_webp import AnymatixSaveAnimatedWEBP
 
 NODE_CLASS_MAPPINGS = {
     "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -40,6 +41,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixVAELoader": AnymatixVAELoader,
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
     "AnymatixImageToVideo": AnymatixImageToVideo,
+    "AnymatixSaveAnimatedWEBP": AnymatixSaveAnimatedWEBP,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -55,6 +57,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixVAELoader": "Anymatix VAE Loader",
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
     "AnymatixImageToVideo": "Anymatix Image To Video",
+    "AnymatixSaveAnimatedWEBP": "Anymatix Save Animated WEBP",
 }
 
 
