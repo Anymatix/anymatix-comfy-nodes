@@ -39,7 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixUNETLoader": AnymatixUNETLoader,
     "AnymatixVAELoader": AnymatixVAELoader,
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
-    "ImageToVideo": AnymatixImageToVideo,
+    "AnymatixImageToVideo": AnymatixImageToVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
