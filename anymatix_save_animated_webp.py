@@ -23,6 +23,7 @@ class AnymatixSaveAnimatedWEBP:
         return {
             "required": {
                 "images": ("IMAGE",),
+                "output_path": ("STRING", {"default": "anymatix/results", "multiline": False}),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "fps": ("FLOAT", {"default": 6.0, "min": 0.01, "max": 1000.0, "step": 0.01}),
                 "lossless": ("BOOLEAN", {"default": True}),
@@ -37,15 +38,15 @@ class AnymatixSaveAnimatedWEBP:
     OUTPUT_NODE = True
     CATEGORY = "Anymatix"
 
-    def save_images(self, images, fps, filename_prefix, lossless, quality, method, 
+    def save_images(self, images, output_path, filename_prefix, fps, lossless, quality, method, 
                    prompt=None, extra_pnginfo=None):
         """
         Save images as animated WEBP with simple filename.
         """
         method = self.methods.get(method, 4)
         
-        # Create output directory
-        output_path = os.path.join(self.output_dir, "anymatix", "results")
+        # Create output directory using the same pattern as image save
+        output_path = os.path.join(folder_paths.get_output_directory(), output_path)
         os.makedirs(output_path, exist_ok=True)
         
         print(f"Anymatix: saving animated WEBP to {output_path}")
@@ -93,7 +94,7 @@ class AnymatixSaveAnimatedWEBP:
         
         results.append({
             "filename": filename,
-            "subfolder": "anymatix/results",
+            "subfolder": output_path.replace(folder_paths.get_output_directory(), "").strip(os.sep),
             "type": self.type
         })
 
