@@ -22,7 +22,7 @@ class AnymatixSaveAnimatedMP4:
 
     # MP4 codec options
     codecs = {
-        "libx264": cv2.VideoWriter_fourcc(*'mp4v'),
+        "libx264": cv2.VideoWriter_fourcc(*'H264'),  # Better browser compatibility
         "h264": cv2.VideoWriter_fourcc(*'H264'),
         "xvid": cv2.VideoWriter_fourcc(*'XVID'),
         "mjpeg": cv2.VideoWriter_fourcc(*'MJPG')
