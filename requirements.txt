@@ -1,0 +1,14 @@
+# Anymatix ComfyUI Nodes Requirements
+# 
+# This file lists the Python dependencies for Anymatix custom nodes
+
+# Core dependencies
+imageio-ffmpeg>=0.4.7    # Automatic FFmpeg management (downloads FFmpeg automatically)
+numpy>=1.19.0           # Required for image processing
+
+# Optional but recommended
+opencv-python>=4.5.0    # For faster image processing (fallback to PIL if not available)
+Pillow>=8.0.0          # Image processing fallback if OpenCV not available
+
+# Note: imageio-ffmpeg will automatically download FFmpeg binaries
+# No manual FFmpeg installation required!

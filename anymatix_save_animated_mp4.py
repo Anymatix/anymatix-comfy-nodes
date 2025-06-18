@@ -4,7 +4,15 @@ import folder_paths
 import subprocess
 import tempfile
 import shutil
-from PIL import Image
+
+# Try to import imageio-ffmpeg for automatic FFmpeg management
+try:
+    import imageio_ffmpeg
+    IMAGEIO_FFMPEG_AVAILABLE = True
+    print("Using imageio-ffmpeg for automatic FFmpeg management")
+except ImportError:
+    IMAGEIO_FFMPEG_AVAILABLE = False
+    print("imageio-ffmpeg not available, falling back to system FFmpeg")
 
 try:
     import cv2
@@ -13,18 +21,33 @@ except ImportError:
     CV2_AVAILABLE = False
     print("Warning: OpenCV (cv2) not available. Will use PIL for image processing.")
 
+def get_ffmpeg_exe():
+    """Get FFmpeg executable path, with automatic download via imageio-ffmpeg if available"""
+    if IMAGEIO_FFMPEG_AVAILABLE:
+        try:
+            # This will automatically download FFmpeg if not present
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+            print(f"Using imageio-ffmpeg: {ffmpeg_path}")
+            return ffmpeg_path
+        except Exception as e:
+            print(f"imageio-ffmpeg failed: {e}, falling back to system FFmpeg")
+    
+    # Fallback to system FFmpeg
+    return 'ffmpeg'
+
 def check_ffmpeg():
-    """Check if FFmpeg is available"""
+    """Check if FFmpeg is available (either via imageio-ffmpeg or system)"""
     try:
-        subprocess.run(['ffmpeg', '-version'], 
+        ffmpeg_exe = get_ffmpeg_exe()
+        subprocess.run([ffmpeg_exe, '-version'], 
                       stdout=subprocess.DEVNULL, 
                       stderr=subprocess.DEVNULL, 
                       check=True)
-        return True
+        return True, ffmpeg_exe
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+        return False, None
 
-FFMPEG_AVAILABLE = check_ffmpeg()
+FFMPEG_AVAILABLE, FFMPEG_EXE = check_ffmpeg()
 
 
 class AnymatixSaveAnimatedMP4:
@@ -85,18 +108,23 @@ class AnymatixSaveAnimatedMP4:
         Save images as MP4 video using FFmpeg for maximum browser compatibility.
         """
         if not FFMPEG_AVAILABLE:
-            print("=" * 60)
+            print("=" * 70)
             print("ERROR: FFmpeg is not available!")
-            print("=" * 60)
+            print("=" * 70)
             print("Anymatix requires FFmpeg for browser-compatible MP4 video encoding.")
             print("")
-            print("To install FFmpeg:")
+            print("RECOMMENDED: Install imageio-ffmpeg for automatic FFmpeg management:")
+            print("  pip install imageio-ffmpeg")
+            print("")
+            print("This will automatically download FFmpeg - no manual installation needed!")
+            print("")
+            print("ALTERNATIVE: Install FFmpeg manually:")
             print("  macOS:    brew install ffmpeg")
             print("  Ubuntu:   sudo apt install ffmpeg") 
             print("  Windows:  Download from https://ffmpeg.org/download.html")
             print("")
             print("After installation, restart ComfyUI and try again.")
-            print("=" * 60)
+            print("=" * 70)
             return {"ui": {"images": [], "animated": (True,)}}
             
         preset = self.codec_presets.get(quality, self.codec_presets["web_compatible"])
@@ -105,7 +133,8 @@ class AnymatixSaveAnimatedMP4:
         output_path = os.path.join(folder_paths.get_output_directory(), output_path)
         os.makedirs(output_path, exist_ok=True)
         
-        print(f"Anymatix: Encoding MP4 with FFmpeg (quality: {quality})")
+        ffmpeg_source = "imageio-ffmpeg" if IMAGEIO_FFMPEG_AVAILABLE else "system"
+        print(f"Anymatix: Encoding MP4 with FFmpeg ({ffmpeg_source}, quality: {quality})")
         print(f"Output path: {output_path}")
         
         results = []
@@ -153,7 +182,7 @@ class AnymatixSaveAnimatedMP4:
                 
                 # Build FFmpeg command for maximum browser compatibility
                 ffmpeg_cmd = [
-                    'ffmpeg',
+                    FFMPEG_EXE,  # Use the detected FFmpeg executable
                     '-y',  # Overwrite output file
                     '-framerate', str(fps),
                     '-i', frame_pattern,
@@ -174,7 +203,7 @@ class AnymatixSaveAnimatedMP4:
                 ffmpeg_cmd.append(file_path)
                 
                 print("Running FFmpeg with browser-optimized settings...")
-                print(f"Command: {' '.join(ffmpeg_cmd[:8])}... {file_path}")
+                print(f"Using: {FFMPEG_EXE}")
                 
                 # Run FFmpeg
                 result = subprocess.run(
@@ -198,6 +227,7 @@ class AnymatixSaveAnimatedMP4:
                     print(f"  Size: {file_size:,} bytes")
                     print(f"  Duration: {duration:.2f} seconds")
                     print(f"  Quality: {quality}")
+                    print(f"  FFmpeg: {ffmpeg_source}")
                     
                     results.append({
                         "filename": filename,
