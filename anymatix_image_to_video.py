@@ -63,5 +63,5 @@ class AnymatixImageToVideo:
         print(f"AnymatixImageToVideo: Processing {batch_size} images at {fps} FPS")
         
         # Simply pass through the inputs - the actual video creation will be handled
-        # by the SaveAnimatedWEBP node that gets injected by the read function
+        # by the SaveAnimatedMP4 node that gets injected by the read function
         return (images, fps)
