@@ -159,8 +159,11 @@ async def reboot_after_delay(delay: int):
 async def serve_expunge(request):
     print("anymatix: expunging cache")
     data = await request.json()
-    keep: list[str] = data["keep"]
-    await expunge(keep, outdir)
+    input_assets: list[str] = data["inputAssets"]
+    computation_results: list[str] = data["computationResults"]
+    await expunge_differentiated(
+        input_assets, computation_results, outdir, folder_paths.input_directory
+    )
     return web.Response(status=200)
 
 
