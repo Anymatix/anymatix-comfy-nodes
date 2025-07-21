@@ -159,11 +159,38 @@ async def reboot_after_delay(delay: int):
 async def serve_expunge(request):
     print("anymatix: expunging cache")
     data = await request.json()
-    input_assets: list[str] = data["inputAssets"]
-    computation_results: list[str] = data["computationResults"]
+    input_assets: list[str] = data.get("inputAssets", [])
+    computation_results: list[str] = data.get("computationResults", [])
+    delete_hashes: list[str] = data.get("delete", [])
+
+    # Perform normal expunge
     await expunge_differentiated(
         input_assets, computation_results, outdir, folder_paths.input_directory
     )
+
+    # If delete parameter is present, delete those hashes from results and input directories
+    from .expunge import hash_pattern, input_asset_pattern
+    deleted = []
+    for h in delete_hashes:
+        # Delete computation result dir if hash matches
+        if hash_pattern.match(h):
+            result_path = Path(outdir) / h
+            if result_path.exists() and result_path.is_dir():
+                try:
+                    shutil.rmtree(result_path)
+                    deleted.append(str(result_path))
+                except Exception as e:
+                    print(f"Failed to delete computation result {result_path}: {e}")
+        # Delete input asset file if hash matches asset pattern
+        for f in Path(folder_paths.input_directory).glob(f"{h}.*"):
+            if input_asset_pattern.match(f.name):
+                try:
+                    os.remove(f)
+                    deleted.append(str(f))
+                except Exception as e:
+                    print(f"Failed to delete input asset {f}: {e}")
+    if deleted:
+        print(f"anymatix: deleted hashes: {deleted}")
     return web.Response(status=200)
 
 
