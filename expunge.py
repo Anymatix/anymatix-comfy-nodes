@@ -92,13 +92,21 @@ async def expunge_differentiated(
             if results_path.exists() and results_path.is_dir():
                 # Remove files inside the output directory
                 for file in results_path.iterdir():
+                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                        f.write(f"Attempting to delete file: {file} in {results_path}\n")
                     try:
                         file.unlink()
+                        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                            f.write(f"Deleted file: {file} in {results_path}\n")
                     except Exception as e:
                         with open(Path(results_dir) / "error.txt", "a") as f:
                             f.write(f"Failed to remove file: {file} in {results_path} - {e}\n")
                 # Check if directory is empty after file deletion
+                with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                    f.write(f"Checking if directory is empty: {results_path}\n")
                 if not any(results_path.iterdir()):
+                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                        f.write(f"Directory is empty, attempting to delete: {results_path}\n")
                     try:
                         results_path.rmdir()
                         with open(Path(results_dir) / "expunge_log.txt", "a") as f:
@@ -115,8 +123,12 @@ async def expunge_differentiated(
         input_path = Path(input_dir) / filename
         with open(Path(results_dir) / "try_remove.txt", "a") as f:
             f.write(f"Input asset: {input_path}\n")
+        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+            f.write(f"Attempting to delete input asset: {input_path}\n")
         try:
             os.remove(input_path)
+            with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                f.write(f"Deleted input asset: {input_path}\n")
         except Exception as e:
             with open(Path(results_dir) / "error.txt", "a") as f:
                 f.write(f"Failed to remove input asset: {input_path} - {e}\n")
