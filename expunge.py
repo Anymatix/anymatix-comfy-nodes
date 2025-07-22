@@ -1,3 +1,7 @@
+import re
+import os
+from pathlib import Path
+
 def delete_file_and_cleanup_dir(file_path: Path, results_dir: str):
     """
     Delete a single file and, if its parent output directory is empty, delete the directory.
