@@ -226,6 +226,13 @@ async def serve_file(request):
             and os.path.isfile(file_path)
             and os.access(file_path, os.R_OK)
         ):
+            # TODO: TEMPORARY, WAITING FOR BETTER CLEANUP STRATEGIES
+            if "forget" in request.rel_url.query:
+                try:
+                    os.remove(file_path)
+                    return web.Response(text="Resource deleted (forget)", status=200)
+                except Exception as e:
+                    return web.Response(text=f"Failed to delete resource: {e}", status=500)
             response = web.FileResponse(file_path)
         # else:
         #     print("****** anymatix", file_path, "is not allowed or does not exist", os.getcwd())
