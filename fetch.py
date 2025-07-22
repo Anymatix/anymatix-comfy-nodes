@@ -1,3 +1,5 @@
+from pathlib import Path
+from .expunge import delete_file_and_cleanup_dir
 import hashlib
 import json
 import os
@@ -57,7 +59,8 @@ def delete_files(url, dir):
                 print("deleting", f)
                 file_path = os.path.join(root, f)
                 print("deleting", file_path)
-                os.remove(file_path)
+                # Use the new cleanup logic
+                delete_file_and_cleanup_dir(Path(file_path), dir)
 
 
 def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None):

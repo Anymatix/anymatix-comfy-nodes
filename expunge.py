@@ -1,3 +1,26 @@
+def delete_file_and_cleanup_dir(file_path: Path, results_dir: str):
+    """
+    Delete a single file and, if its parent output directory is empty, delete the directory.
+    TODO: If output folders can have more than one level of hierarchy, make this logic more robust.
+    """
+    try:
+        file_path.unlink()
+        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+            f.write(f"Deleted file: {file_path}\n")
+    except Exception as e:
+        with open(Path(results_dir) / "error.txt", "a") as f:
+            f.write(f"Failed to remove file: {file_path} - {e}\n")
+    parent_dir = file_path.parent
+    # TODO: If output folders can have more than one level of hierarchy, make this logic more robust.
+    remaining_files = [f for f in parent_dir.iterdir()]
+    if not remaining_files:
+        try:
+            parent_dir.rmdir()
+            with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                f.write(f"Deleted empty output directory: {parent_dir}\n")
+        except Exception as e:
+            with open(Path(results_dir) / "error.txt", "a") as f:
+                f.write(f"Failed to remove output directory: {parent_dir} - {e}\n")
 import re
 import shutil
 from pathlib import Path
