@@ -23,8 +23,8 @@ def delete_file_and_cleanup_dir(file_path: Path, results_dir: str):
                 f.write(f"Failed to remove output directory: {parent_dir} - {e}\n")
 import re
 import shutil
-from pathlib import Path
 import os
+from pathlib import Path
 
 pattern = re.compile(r"^.*anymatix/results/[a-f0-9]{64}$")
 hash_pattern = re.compile(r"^[a-f0-9]{64}$")
