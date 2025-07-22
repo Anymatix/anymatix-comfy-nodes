@@ -62,7 +62,23 @@ async def expunge_differentiated(
         with open(Path(results_dir) / "try_remove.txt", "a") as f:
             f.write(f"Computation result: {results_path}\n")
         if pattern.match(posixpath):  # Extra sanity check
-            shutil.rmtree(results_path)
+            if results_path.exists() and results_path.is_dir():
+                # Remove files inside the output directory
+                for file in results_path.iterdir():
+                    try:
+                        file.unlink()
+                    except Exception as e:
+                        with open(Path(results_dir) / "error.txt", "a") as f:
+                            f.write(f"Failed to remove file: {file} in {results_path} - {e}\n")
+                # Check if directory is empty after file deletion
+                if not any(results_path.iterdir()):
+                    try:
+                        results_path.rmdir()
+                        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
+                            f.write(f"Deleted empty output directory: {results_path}\n")
+                    except Exception as e:
+                        with open(Path(results_dir) / "error.txt", "a") as f:
+                            f.write(f"Failed to remove output directory: {results_path} - {e}\n")
         else:
             with open(Path(results_dir) / "error.txt", "a") as f:
                 f.write(f"Failed to remove computation result: {results_path}\n")
