@@ -52,15 +52,45 @@ def fetch(url: str, session: Session, callback: Callable[[bytes], None], local_f
 def delete_files(url, dir):
     print("delete files", url)
     url_hash = hash_string(url)
+    deleted_dirs = set()
     for root, _, files in os.walk(dir):
         for f in files:
-            print("examining", f)
+            log_path = Path(dir) / "expunge_log.txt"
+            error_path = Path(dir) / "error.txt"
+            with open(log_path, "a") as log:
+                log.write(f"Examining file: {f} in {root}\n")
             if url_hash in f:
-                print("deleting", f)
+                with open(log_path, "a") as log:
+                    log.write(f"Matched hash, deleting file: {f} in {root}\n")
                 file_path = os.path.join(root, f)
-                print("deleting", file_path)
-                # Use the new cleanup logic
-                delete_file_and_cleanup_dir(Path(file_path), dir)
+                with open(log_path, "a") as log:
+                    log.write(f"Attempting to delete file: {file_path}\n")
+                try:
+                    delete_file_and_cleanup_dir(Path(file_path), dir)
+                    with open(log_path, "a") as log:
+                        log.write(f"Deleted file and checked parent dir: {file_path}\n")
+                except Exception as e:
+                    with open(error_path, "a") as err:
+                        err.write(f"Failed to delete file: {file_path} - {e}\n")
+                deleted_dirs.add(os.path.dirname(file_path))
+    # After all deletions, check and remove empty parent directories
+    for d in deleted_dirs:
+        parent = Path(d)
+        with open(log_path, "a") as log:
+            log.write(f"Checking if parent directory is empty: {parent}\n")
+        if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
+            with open(log_path, "a") as log:
+                log.write(f"Parent directory is empty, attempting to delete: {parent}\n")
+            try:
+                parent.rmdir()
+                with open(log_path, "a") as log:
+                    log.write(f"fetch.py: Deleted empty output directory: {parent}\n")
+            except Exception as e:
+                with open(error_path, "a") as err:
+                    err.write(f"fetch.py: Failed to remove output directory: {parent} - {e}\n")
+        else:
+            with open(log_path, "a") as log:
+                log.write(f"Parent directory not empty after deletion: {parent}\n")
 
 
 def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None):
