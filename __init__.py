@@ -230,6 +230,7 @@ async def serve_file(request):
             if "forget" in request.rel_url.query:
                 try:
                     os.remove(file_path)
+                    print(f"anymatix: deleted resource {file_path}")
                     return web.Response(text="Resource deleted (forget)", status=200)
                 except Exception as e:
                     return web.Response(text=f"Failed to delete resource: {e}", status=500)
