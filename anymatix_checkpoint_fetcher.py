@@ -210,6 +210,10 @@ class AnymatixCheckpointFetcher:
                         "default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
                     },
                 ),
+            },
+            "optional": {
+                # Optional auth query tail, e.g. "token=xxxx". Not persisted; only used at runtime.
+                "auth": ("STRING", {}),
             }
         }
 
@@ -217,7 +221,7 @@ class AnymatixCheckpointFetcher:
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
 
-    def download_model(self, url):
+    def download_model(self, url, auth=None):
         pbar = comfy.utils.ProgressBar(1000)
         progress = 0
         pbar.update_absolute(progress, 1000)
@@ -248,27 +252,33 @@ class AnymatixCheckpointFetcher:
                 return expand_info_civitai(url)
             return None
 
-        # Build base/effective URLs: strip sensitive auth (e.g., token) from base, keep it only in effective
-        # TODO: This seems to be specific for "token" args, fix it, use the passed auth append data.
+        # Build base/effective URLs. Prefer explicit auth arg; else, preserve legacy token-in-URL behavior.
         try:
             p = urlparse(url)
             pairs = parse_qsl(p.query, keep_blank_values=True)
             non_auth = []
-            auth_pairs = []
+            legacy_auth_pairs = []
             for k, v in pairs:
                 if k == "token":
-                    auth_pairs.append((k, v))
+                    legacy_auth_pairs.append((k, v))
                 else:
                     non_auth.append((k, v))
             base_query = urlencode(non_auth)
             base_url = urlunparse(p._replace(query=base_query))
-            auth_tail = urlencode(auth_pairs) if auth_pairs else None
-            # Effective URL is base + auth pairs (if any). This equals the original when token was provided.
-            if auth_tail:
-                effective_query = urlencode(non_auth + auth_pairs)
+
+            # Decide which auth to use: explicit auth arg wins; otherwise use legacy token found in URL
+            if auth is not None and len(str(auth)) > 0:
+                to_add = parse_qsl(str(auth), keep_blank_values=True)
+                effective_query = urlencode(non_auth + to_add)
                 effective_url = urlunparse(p._replace(query=effective_query))
+                auth_tail = str(auth)
+            elif legacy_auth_pairs:
+                effective_query = urlencode(non_auth + legacy_auth_pairs)
+                effective_url = urlunparse(p._replace(query=effective_query))
+                auth_tail = urlencode(legacy_auth_pairs)
             else:
                 effective_url = base_url
+                auth_tail = None
         except Exception:
             # Fallback to original behavior if parsing fails
             base_url = url
@@ -305,7 +315,7 @@ class AnymatixFetcher:
             "required": {
                 # "url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),
                 # Keep declared fields minimal; auth (if present) is accepted at runtime but not exposed in UI
-                "url": ({"url": "STRING", "type": "STRING"}, {}),
+                "url": ({"url": "STRING", "type": "STRING", "auth": "STRING"}, {}),
             }
         }
 
