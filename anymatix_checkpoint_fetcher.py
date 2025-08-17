@@ -1,5 +1,6 @@
 import json
 import os
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import re
 
 import requests
@@ -247,8 +248,40 @@ class AnymatixCheckpointFetcher:
                 return expand_info_civitai(url)
             return None
 
+        # Build base/effective URLs: strip sensitive auth (e.g., token) from base, keep it only in effective
+        # TODO: This seems to be specific for "token" args, fix it, use the passed auth append data.
+        try:
+            p = urlparse(url)
+            pairs = parse_qsl(p.query, keep_blank_values=True)
+            non_auth = []
+            auth_pairs = []
+            for k, v in pairs:
+                if k == "token":
+                    auth_pairs.append((k, v))
+                else:
+                    non_auth.append((k, v))
+            base_query = urlencode(non_auth)
+            base_url = urlunparse(p._replace(query=base_query))
+            auth_tail = urlencode(auth_pairs) if auth_pairs else None
+            # Effective URL is base + auth pairs (if any). This equals the original when token was provided.
+            if auth_tail:
+                effective_query = urlencode(non_auth + auth_pairs)
+                effective_url = urlunparse(p._replace(query=effective_query))
+            else:
+                effective_url = base_url
+        except Exception:
+            # Fallback to original behavior if parsing fails
+            base_url = url
+            effective_url = url
+            auth_tail = None
+
         model_name = download_file(
-            url=url, dir=CHECKPOINTS_DIR, callback=callback, expand_info=expand_info
+            url=base_url,
+            dir=CHECKPOINTS_DIR,
+            callback=callback,
+            expand_info=expand_info,
+            effective_url=effective_url,
+            redact_append=auth_tail,
         )
         return (model_name,)
 
@@ -271,6 +304,7 @@ class AnymatixFetcher:
         return {
             "required": {
                 # "url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),
+                # Keep declared fields minimal; auth (if present) is accepted at runtime but not exposed in UI
                 "url": ({"url": "STRING", "type": "STRING"}, {}),
             }
         }
@@ -280,7 +314,12 @@ class AnymatixFetcher:
     CATEGORY = "Anymatix"
 
     def download_model(self, url):
-        print("download model", type(url), url)
+        # Avoid printing tokens; only show safe info
+        try:
+            safe_preview = {k: ("<redacted>" if k == "auth" else v) for k, v in url.items()}
+            print("download model", type(url), safe_preview)
+        except Exception:
+            pass
         if url["type"] in dirmap:
             dir = os.path.join(folder_paths.models_dir, dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
@@ -313,8 +352,25 @@ class AnymatixFetcher:
                     return expand_info_civitai(url)
                 return None
 
+            base_url = url.get("url")
+            auth = url.get("auth")
+            if auth is not None and len(auth) > 0:
+                # Robustly append query parameters using urllib
+                p = urlparse(base_url)
+                existing = parse_qsl(p.query, keep_blank_values=True)
+                to_add = parse_qsl(auth, keep_blank_values=True)
+                new_query = urlencode(existing + to_add)
+                effective = urlunparse(p._replace(query=new_query))
+            else:
+                effective = base_url
+
             model_name = download_file(
-                url=url["url"], dir=dir, callback=callback, expand_info=expand_info
+                url=base_url,
+                dir=dir,
+                callback=callback,
+                expand_info=expand_info,
+                effective_url=effective,
+                redact_append=auth,
             )
             print("fetched model", model_name)
             return (model_name,)

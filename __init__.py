@@ -204,7 +204,6 @@ async def serve_cache_size(request):
 async def serve_delete(request):
     print("anymatix: deleting resource")
     data = await request.json()
-    print("anymatix:", data)
     url = data["url"]
     delete_files(url, folder_paths.models_dir)
     return web.Response(status=200)
