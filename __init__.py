@@ -331,7 +331,7 @@ async def serve_file(request):
     if basedir in allowed_dirs:
         # TODO: the check on getcwd is plain wrong (if the cwd is not what I expected). Determine from the current script?
         file_path = os.path.abspath(f"{basedir}/{request.match_info['filename']}")
-        base = f"{os.path.abspath(os.getcwd())}/{basedir}"
+        base = os.path.abspath(os.path.join(os.getcwd(), basedir))
         if (
             file_path.startswith(base)
             and os.path.isfile(file_path)
