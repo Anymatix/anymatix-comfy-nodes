@@ -463,9 +463,12 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
         return False, None
         
     try:
-        # First try HEAD request
+        # First try HEAD request to get the final URL after redirects
         with requests.head(url, allow_redirects=True, timeout=10) as response:
             response.raise_for_status()
+            
+            # Get the final redirected URL - this is what we'll actually download from
+            final_url = response.url
             
             accepts_ranges = response.headers.get('Accept-Ranges', '').lower() == 'bytes'
             content_length = response.headers.get('Content-Length')
@@ -476,13 +479,26 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
                 print(f"✅ [ANYMATIX RANGE] Server explicitly supports Range requests via Accept-Ranges header")
                 return True, file_size
             
+            # Special handling for known cloud storage services that support ranges but may have signed URLs
+            if any(domain in final_url.lower() for domain in [
+                'cloudflarestorage.com',  # Cloudflare R2
+                'amazonaws.com',          # AWS S3
+                's3.amazonaws.com',       # AWS S3
+                'digitaloceanspaces.com', # DigitalOcean Spaces
+                'storage.googleapis.com', # Google Cloud Storage
+                'blob.core.windows.net'   # Azure Blob Storage
+            ]):
+                print(f"✅ [ANYMATIX RANGE] Assuming Range support for cloud storage URL: {final_url.split('/')[2]}")
+                return True, file_size
+            
             # If no Accept-Ranges header, try a small range request to test
-            # Many servers support ranges but don't advertise it properly
+            # IMPORTANT: Use the SAME final_url to avoid different signed URLs
             if file_size and file_size > 1024:
                 print(f"🔍 [ANYMATIX RANGE] Testing Range request support (no Accept-Ranges header found)")
                 try:
                     test_headers = {'Range': 'bytes=0-1023'}  # Request first 1KB
-                    with requests.get(url, headers=test_headers, stream=True, timeout=10) as test_response:
+                    # Use final_url directly with allow_redirects=False to test exact same endpoint
+                    with requests.get(final_url, headers=test_headers, stream=True, timeout=10, allow_redirects=False) as test_response:
                         if test_response.status_code == 206:  # Partial Content
                             print(f"✅ [ANYMATIX RANGE] Server supports Range requests (tested with small range)")
                             return True, file_size
