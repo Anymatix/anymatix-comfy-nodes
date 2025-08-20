@@ -198,10 +198,22 @@ class SegmentDownloader:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             segment_data += chunk
+                            chunk_size = len(chunk)
                             with self.lock:
-                                self.downloaded_bytes += len(chunk)
+                                self.downloaded_bytes += chunk_size
+                                # Update TQDM progress bar if available
+                                if hasattr(self, '_progress_bar') and self._progress_bar:
+                                    self._progress_bar.update(chunk_size)
                                 if self.progress_callback:
                                     self.progress_callback(self.downloaded_bytes, self.total_size)
+                                
+                                # Console progress every 100MB for anymatix terminal
+                                if self.downloaded_bytes % (100 * 1024 * 1024) < chunk_size:
+                                    mb_downloaded = self.downloaded_bytes / (1024 * 1024)
+                                    mb_total = self.total_size / (1024 * 1024)
+                                    percent = (self.downloaded_bytes / self.total_size) * 100
+                                    active_segments = len([s for s in self.active_segments.keys()])
+                                    print(f"🚀 [ANYMATIX PARALLEL] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%) - {active_segments} segments active")
                     
                     # Write segment to temp file
                     temp_path = f"{self.file_path}.segment_{segment_id}"
@@ -225,38 +237,76 @@ class SegmentDownloader:
         
     def download_parallel(self) -> bool:
         """Execute parallel download with intelligent load balancing"""
-        segments = self._calculate_segments()
+        progress_bar = None
         
-        # Use ThreadPoolExecutor for optimal thread management
-        with ThreadPoolExecutor(max_workers=self.max_connections, 
-                              thread_name_prefix="download_segment") as executor:
-            # Submit all segment download tasks
-            futures = {
-                executor.submit(self._download_segment_sync, seg_id, start, end): (seg_id, start, end)
-                for seg_id, start, end in segments
-            }
-            
-            # Wait for completion with progress tracking
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                seg_id, start, end = futures[future]
+        try:
+            # Initialize TQDM progress bar
+            if TQDM_AVAILABLE:
                 try:
-                    success = future.result()
-                    if not success:
-                        return False
-                except Exception as e:
-                    with self.lock:
-                        self.failed_segments.append((seg_id, start, end))
-                    return False
+                    progress_bar = tqdm(
+                        total=self.total_size,
+                        desc="Threaded Download",
+                        unit='B',
+                        unit_scale=True,
+                        leave=True
+                    )
+                    # Store as instance variable for access in _download_segment_sync
+                    self._progress_bar = progress_bar
+                except:
+                    progress_bar = None
+                    self._progress_bar = None
+            else:
+                self._progress_bar = None
         
-        # Retry failed segments with single connection
-        if self.failed_segments:
-            for seg_id, start, end in self.failed_segments:
-                if not self._download_segment_sync(seg_id, start, end):
-                    return False
-                    
-        return True
+            segments = self._calculate_segments()
+            
+            # Use ThreadPoolExecutor for optimal thread management
+            with ThreadPoolExecutor(max_workers=self.max_connections, 
+                                  thread_name_prefix="download_segment") as executor:
+                # Submit all segment download tasks
+                futures = {
+                    executor.submit(self._download_segment_sync, seg_id, start, end): (seg_id, start, end)
+                    for seg_id, start, end in segments
+                }
+                
+                # Wait for completion with progress tracking
+                completed = 0
+                for future in as_completed(futures):
+                    completed += 1
+                    seg_id, start, end = futures[future]
+                    try:
+                        success = future.result()
+                        if not success:
+                            return False
+                    except Exception as e:
+                        with self.lock:
+                            self.failed_segments.append((seg_id, start, end))
+                        return False
+            
+            # Retry failed segments with single connection
+            if self.failed_segments:
+                for seg_id, start, end in self.failed_segments:
+                    if not self._download_segment_sync(seg_id, start, end):
+                        return False
+            
+            if progress_bar:
+                progress_bar.close()
+            # Clean up progress bar reference
+            if hasattr(self, '_progress_bar'):
+                delattr(self, '_progress_bar')
+                        
+            return True
+        
+        except Exception:
+            if progress_bar:
+                try:
+                    progress_bar.close()
+                except:
+                    pass
+            # Clean up progress bar reference
+            if hasattr(self, '_progress_bar'):
+                delattr(self, '_progress_bar')
+            return False
         
     def assemble_file(self) -> bool:
         """Assemble segments into final file with integrity verification"""
@@ -325,7 +375,21 @@ class AsyncParallelDownloader:
         
     async def download_async(self) -> bool:
         """Execute async parallel download with HTTP/2 optimization"""
+        progress_bar = None
         try:
+            # Initialize TQDM progress bar
+            if TQDM_AVAILABLE:
+                try:
+                    progress_bar = tqdm(
+                        total=self.total_size,
+                        desc="Async Download",
+                        unit='B',
+                        unit_scale=True,
+                        leave=True
+                    )
+                except:
+                    progress_bar = None
+            
             # Calculate segments
             segment_size = max(1024*1024, self.total_size // self.max_connections)  # At least 1MB per segment
             segments = []
@@ -354,6 +418,8 @@ class AsyncParallelDownloader:
                 
                 def progress_update(bytes_read):
                     self.downloaded_bytes += bytes_read
+                    if progress_bar:
+                        progress_bar.update(bytes_read)
                     if self.progress_callback:
                         self.progress_callback(self.downloaded_bytes, self.total_size)
                 
@@ -378,9 +444,16 @@ class AsyncParallelDownloader:
                     for i in range(len(segments)):
                         await f.write(segment_data[i])
                 
+                if progress_bar:
+                    progress_bar.close()
                 return True
                 
         except Exception:
+            if progress_bar:
+                try:
+                    progress_bar.close()
+                except:
+                    pass
             return False
 
 
@@ -390,6 +463,7 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
         return False, None
         
     try:
+        # First try HEAD request
         with requests.head(url, allow_redirects=True, timeout=10) as response:
             response.raise_for_status()
             
@@ -397,8 +471,29 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
             content_length = response.headers.get('Content-Length')
             file_size = int(content_length) if content_length else None
             
-            return accepts_ranges, file_size
-    except Exception:
+            # If Accept-Ranges header is present and says 'bytes', we're good
+            if accepts_ranges:
+                print(f"✅ [ANYMATIX RANGE] Server explicitly supports Range requests via Accept-Ranges header")
+                return True, file_size
+            
+            # If no Accept-Ranges header, try a small range request to test
+            # Many servers support ranges but don't advertise it properly
+            if file_size and file_size > 1024:
+                print(f"🔍 [ANYMATIX RANGE] Testing Range request support (no Accept-Ranges header found)")
+                try:
+                    test_headers = {'Range': 'bytes=0-1023'}  # Request first 1KB
+                    with requests.get(url, headers=test_headers, stream=True, timeout=10) as test_response:
+                        if test_response.status_code == 206:  # Partial Content
+                            print(f"✅ [ANYMATIX RANGE] Server supports Range requests (tested with small range)")
+                            return True, file_size
+                        else:
+                            print(f"❌ [ANYMATIX RANGE] Server doesn't support Range requests (got status {test_response.status_code})")
+                except Exception as e:
+                    print(f"⚠️  [ANYMATIX RANGE] Range test failed: {e}")
+            
+            return False, file_size
+    except Exception as e:
+        print(f"⚠️  [ANYMATIX RANGE] Range support check failed: {e}")
         return False, None
 
 
@@ -413,11 +508,17 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
     supports_ranges, total_size = check_range_support(url)
     
     if not supports_ranges or not total_size:
-        # Fallback to traditional download
-        return False
+        # For signed URLs (like Civitai), try a live range test during actual download
+        if not supports_ranges and total_size:
+            print(f"🔍 Server capabilities unknown - will attempt range detection during download")
+            # We'll try parallel anyway and fall back if it fails
+        else:
+            print(f"❌ Parallel download not possible: supports_ranges={supports_ranges}, total_size={total_size}")
+            return False
         
     # Skip parallel for small files (< 5MB)
-    if total_size < 5 * 1024 * 1024:
+    if total_size and total_size < 5 * 1024 * 1024:
+        print(f"⏩ Skipping parallel for small file ({total_size//1024//1024}MB < 5MB)")
         return False
         
     # Handle resume scenario
@@ -425,12 +526,14 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
         if local_file_size >= total_size:
             return True  # Already complete
         # For resume, we'll use traditional method for simplicity
+        print(f"📁 Resume scenario detected - using traditional download")
         return False
     
     # Choose download strategy based on available dependencies
     try:
         # Try async method first (fastest) if available
         if AIOHTTP_AVAILABLE and AIOFILES_AVAILABLE:
+            print(f"🚀 Using async parallel download strategy")
             async def run_async():
                 downloader = AsyncParallelDownloader(url, file_path, total_size, callback, max_connections)
                 return await downloader.download_async()
@@ -445,12 +548,14 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             return loop.run_until_complete(run_async())
         else:
             # Fallback to threaded parallel download
+            print(f"⚡ Using threaded parallel download strategy")
             downloader = SegmentDownloader(url, file_path, total_size, callback, max_connections)
             if downloader.download_parallel():
                 return downloader.assemble_file()
             return False
         
-    except Exception:
+    except Exception as e:
+        print(f"⚠️  Parallel download strategy failed: {e}")
         return False
 
 
@@ -589,7 +694,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         # STATE-OF-THE-ART PARALLEL DOWNLOAD ATTEMPT
         parallel_success = False
         if local_file_size == 0 and data["file_size"] is not None:  # Only for fresh downloads
-            print(f"Attempting parallel download for {data['file_name']} ({data['file_size']} bytes)")
+            print(f"🚀 [ANYMATIX DOWNLOAD] Attempting parallel download for {data['file_name']} ({data['file_size']} bytes)")
             try:
                 parallel_success = fetch_parallel(
                     effective, 
@@ -599,15 +704,18 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     max_connections=min(8, max(2, data["file_size"] // (10*1024*1024)))  # Adaptive connections
                 )
                 if parallel_success:
-                    print(f"✅ Parallel download completed successfully: {data['file_name']}")
+                    mb_total = data["file_size"] / (1024 * 1024) if data["file_size"] else 0
+                    print(f"✅ [ANYMATIX DOWNLOAD] Parallel download completed successfully: {data['file_name']} ({mb_total:.0f}MB)")
                     return file_path
+                else:
+                    print(f"⚠️  [ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
-                print(f"⚠️  Parallel download failed, falling back to traditional: {e}")
+                print(f"⚠️  [ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to traditional: {e}")
                 parallel_success = False
 
         # TRADITIONAL FALLBACK (backwards compatible)
         if not parallel_success:
-            print(f"Using traditional download for {data['file_name']}")
+            print(f"🔄 [ANYMATIX DOWNLOAD] Using traditional download for {data['file_name']}")
             with open(file_path, 'ab') as file:
                 progress_bar = None
                 if TQDM_AVAILABLE and data["file_size"]:
@@ -626,6 +734,13 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                             progress_bar.update(l)
                         if callback:
                             callback(downloaded_size, data["file_size"])
+                        
+                        # Additional console progress for anymatix terminal
+                        if data["file_size"] and downloaded_size % (50 * 1024 * 1024) < l:  # Every 50MB
+                            mb_downloaded = downloaded_size / (1024 * 1024)
+                            mb_total = data["file_size"] / (1024 * 1024)
+                            percent = (downloaded_size / data["file_size"]) * 100
+                            print(f"📥 [ANYMATIX PROGRESS] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%)")
                             
                 try:
                     fetch(effective, session, cb, local_file_size)
@@ -635,6 +750,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                             progress_bar.close()
                         except:
                             pass
+                    
+                    # Final status message for anymatix terminal
+                    if downloaded_size == data["file_size"]:
+                        mb_final = downloaded_size / (1024 * 1024)
+                        print(f"✅ [ANYMATIX DOWNLOAD] Traditional download completed: {mb_final:.0f}MB")
 
         print("Model name:", data["file_name"])
 
