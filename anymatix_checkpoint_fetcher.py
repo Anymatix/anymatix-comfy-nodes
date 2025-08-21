@@ -285,15 +285,21 @@ class AnymatixCheckpointFetcher:
             effective_url = url
             auth_tail = None
 
-        model_name = download_file(
-            url=base_url,
-            dir=CHECKPOINTS_DIR,
-            callback=callback,
-            expand_info=expand_info,
-            effective_url=effective_url,
-            redact_append=auth_tail,
-        )
-        return (model_name,)
+        try:
+            model_name = download_file(
+                url=base_url,
+                dir=CHECKPOINTS_DIR,
+                callback=callback,
+                expand_info=expand_info,
+                effective_url=effective_url,
+                redact_append=auth_tail,
+            )
+            return (model_name,)
+        except Exception as e:
+            # Enhance error message with context for better debugging
+            error_msg = f"AnymatixCheckpointFetcher failed to download from {base_url}: {e}"
+            print(f"[ANYMATIX ERROR] {error_msg}")
+            raise Exception(error_msg) from e
 
 
 dirmap = {
@@ -374,13 +380,20 @@ class AnymatixFetcher:
             else:
                 effective = base_url
 
-            model_name = download_file(
-                url=base_url,
-                dir=dir,
-                callback=callback,
-                expand_info=expand_info,
-                effective_url=effective,
-                redact_append=auth,
-            )
-            print("fetched model", model_name)
-            return (model_name,)
+            try:
+                model_name = download_file(
+                    url=base_url,
+                    dir=dir,
+                    callback=callback,
+                    expand_info=expand_info,
+                    effective_url=effective,
+                    redact_append=auth,
+                )
+                print("fetched model", model_name)
+                return (model_name,)
+            except Exception as e:
+                # Enhance error message with context for better debugging
+                model_type = url.get("type", "unknown")
+                error_msg = f"AnymatixFetcher failed to download {model_type} model from {base_url}: {e}"
+                print(f"[ANYMATIX ERROR] {error_msg}")
+                raise Exception(error_msg) from e

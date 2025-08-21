@@ -127,11 +127,16 @@ def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size:
     if local_file_size > 0:
         req_headers = {'Range': f'bytes={local_file_size}-'}
 
-    # TODO: what if "Range" is not accepted?
-    with session.get(url, headers=req_headers, allow_redirects=True, stream=True) as response_2:
-        response_2.raise_for_status()
-        for item in response_2.iter_content(chunk_size):
-            callback(item)
+    try:
+        # TODO: what if "Range" is not accepted?
+        with session.get(url, headers=req_headers, allow_redirects=True, stream=True) as response_2:
+            response_2.raise_for_status()
+            for item in response_2.iter_content(chunk_size):
+                callback(item)
+    except requests.RequestException as e:
+        raise Exception(f"HTTP request failed during traditional download: {e}") from e
+    except Exception as e:
+        raise Exception(f"Unexpected error during traditional download: {e}") from e
 
 
 class SegmentDownloader:
@@ -213,7 +218,7 @@ class SegmentDownloader:
                                     mb_total = self.total_size / (1024 * 1024)
                                     percent = (self.downloaded_bytes / self.total_size) * 100
                                     active_segments = len([s for s in self.active_segments.keys()])
-                                    print(f"🚀 [ANYMATIX PARALLEL] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%) - {active_segments} segments active")
+                                    print(f"[ANYMATIX PARALLEL] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%) - {active_segments} segments active")
                     
                     # Write segment to temp file
                     temp_path = f"{self.file_path}.segment_{segment_id}"
@@ -231,13 +236,15 @@ class SegmentDownloader:
                     time.sleep(wait_time)
                 else:
                     with self.lock:
-                        self.failed_segments.append((segment_id, start, end))
+                        error_msg = f"Segment {segment_id} download failed after {max_retries} attempts"
+                        self.failed_segments.append((segment_id, start, end, error_msg))
                     return False
         return False
         
     def download_parallel(self) -> bool:
         """Execute parallel download with intelligent load balancing"""
         progress_bar = None
+        failed_segment_errors = []
         
         try:
             # Initialize TQDM progress bar
@@ -277,17 +284,38 @@ class SegmentDownloader:
                     try:
                         success = future.result()
                         if not success:
-                            return False
+                            # Collect the error message from failed segments
+                            with self.lock:
+                                for failed_seg in self.failed_segments:
+                                    if failed_seg[0] == seg_id and len(failed_seg) > 3:
+                                        failed_segment_errors.append(f"Segment {seg_id}: {failed_seg[3]}")
+                                    elif failed_seg[0] == seg_id:
+                                        failed_segment_errors.append(f"Segment {seg_id} failed")
                     except Exception as e:
+                        failed_segment_errors.append(f"Segment {seg_id} threw exception: {e}")
                         with self.lock:
-                            self.failed_segments.append((seg_id, start, end))
-                        return False
+                            self.failed_segments.append((seg_id, start, end, str(e)))
+            
+            # Check if any segments failed
+            if failed_segment_errors:
+                error_summary = "; ".join(failed_segment_errors[:5])  # Show up to 5 errors
+                if len(failed_segment_errors) > 5:
+                    error_summary += f" and {len(failed_segment_errors) - 5} more errors"
+                raise Exception(f"Parallel download failed due to segment errors: {error_summary}")
             
             # Retry failed segments with single connection
             if self.failed_segments:
-                for seg_id, start, end in self.failed_segments:
+                retry_errors = []
+                for seg_id, start, end, *error_info in self.failed_segments:
                     if not self._download_segment_sync(seg_id, start, end):
-                        return False
+                        error_msg = error_info[0] if error_info else f"Segment {seg_id} retry failed"
+                        retry_errors.append(error_msg)
+                
+                if retry_errors:
+                    error_summary = "; ".join(retry_errors[:3])
+                    if len(retry_errors) > 3:
+                        error_summary += f" and {len(retry_errors) - 3} more retry failures"
+                    raise Exception(f"Segment retry failed: {error_summary}")
             
             if progress_bar:
                 progress_bar.close()
@@ -297,7 +325,7 @@ class SegmentDownloader:
                         
             return True
         
-        except Exception:
+        except Exception as e:
             if progress_bar:
                 try:
                     progress_bar.close()
@@ -306,19 +334,25 @@ class SegmentDownloader:
             # Clean up progress bar reference
             if hasattr(self, '_progress_bar'):
                 delattr(self, '_progress_bar')
-            return False
+            # Re-raise the exception to propagate it up to the node
+            raise e
         
     def assemble_file(self) -> bool:
         """Assemble segments into final file with integrity verification"""
         try:
+            missing_segments = []
             with open(self.file_path, 'wb') as output_file:
                 for i in range(len(self.active_segments)):
                     segment_path = self.active_segments.get(i)
                     if not segment_path or not os.path.exists(segment_path):
-                        return False
+                        missing_segments.append(i)
+                        continue
                         
                     with open(segment_path, 'rb') as segment_file:
                         output_file.write(segment_file.read())
+            
+            if missing_segments:
+                raise Exception(f"Missing segments during assembly: {missing_segments}")
             
             # Cleanup temp files
             for segment_path in self.active_segments.values():
@@ -329,10 +363,26 @@ class SegmentDownloader:
                     
             # Verify file size
             final_size = os.path.getsize(self.file_path)
-            return final_size == self.total_size
+            if final_size != self.total_size:
+                raise Exception(f"File size mismatch after assembly: expected {self.total_size}, got {final_size}")
             
-        except Exception:
-            return False
+            return True
+            
+        except Exception as e:
+            # Clean up any temp files on error
+            for segment_path in self.active_segments.values():
+                try:
+                    if os.path.exists(segment_path):
+                        os.remove(segment_path)
+                except:
+                    pass
+            # Remove incomplete output file
+            try:
+                if os.path.exists(self.file_path):
+                    os.remove(self.file_path)
+            except:
+                pass
+            raise Exception(f"Failed to assemble downloaded file: {e}") from e
 
 
 async def fetch_async_segment(session, url: str, start: int, end: int, 
@@ -431,36 +481,48 @@ class AsyncParallelDownloader:
                 
                 segment_results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Check for failures
+                # Check for failures and collect error details
                 segment_data = {}
+                failed_segments = []
                 for result in segment_results:
                     if isinstance(result, Exception):
-                        return False
-                    seg_id, data = result
-                    segment_data[seg_id] = data
+                        failed_segments.append(str(result))
+                    else:
+                        seg_id, data = result
+                        segment_data[seg_id] = data
+                
+                if failed_segments:
+                    error_summary = "; ".join(failed_segments[:3])
+                    if len(failed_segments) > 3:
+                        error_summary += f" and {len(failed_segments) - 3} more async segment errors"
+                    raise Exception(f"Async parallel download failed: {error_summary}")
                 
                 # Assemble file
-                async with aiofiles.open(self.file_path, 'wb') as f:
-                    for i in range(len(segments)):
-                        await f.write(segment_data[i])
+                try:
+                    async with aiofiles.open(self.file_path, 'wb') as f:
+                        for i in range(len(segments)):
+                            await f.write(segment_data[i])
+                except Exception as e:
+                    raise Exception(f"Failed to write assembled async segments to file: {e}") from e
                 
                 if progress_bar:
                     progress_bar.close()
                 return True
                 
-        except Exception:
+        except Exception as e:
             if progress_bar:
                 try:
                     progress_bar.close()
                 except:
                     pass
-            return False
+            # Re-raise exception to propagate to node
+            raise Exception(f"Async parallel download failed: {e}") from e
 
 
 def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
     """Check if server supports range requests and get file size"""
     if not REQUESTS_AVAILABLE:
-        return False, None
+        raise ImportError("requests library not available for range support check")
         
     try:
         # First try HEAD request to get the final URL after redirects
@@ -476,7 +538,7 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
             
             # If Accept-Ranges header is present and says 'bytes', we're good
             if accepts_ranges:
-                print(f"✅ [ANYMATIX RANGE] Server explicitly supports Range requests via Accept-Ranges header")
+                print(f"[ANYMATIX RANGE] Server explicitly supports Range requests via Accept-Ranges header")
                 return True, file_size
             
             # Special handling for known cloud storage services that support ranges but may have signed URLs
@@ -488,29 +550,31 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
                 'storage.googleapis.com', # Google Cloud Storage
                 'blob.core.windows.net'   # Azure Blob Storage
             ]):
-                print(f"✅ [ANYMATIX RANGE] Assuming Range support for cloud storage URL: {final_url.split('/')[2]}")
+                print(f"[ANYMATIX RANGE] Assuming Range support for cloud storage URL: {final_url.split('/')[2]}")
                 return True, file_size
             
             # If no Accept-Ranges header, try a small range request to test
             # IMPORTANT: Use the SAME final_url to avoid different signed URLs
             if file_size and file_size > 1024:
-                print(f"🔍 [ANYMATIX RANGE] Testing Range request support (no Accept-Ranges header found)")
+                print(f"[ANYMATIX RANGE] Testing Range request support (no Accept-Ranges header found)")
                 try:
                     test_headers = {'Range': 'bytes=0-1023'}  # Request first 1KB
                     # Use final_url directly with allow_redirects=False to test exact same endpoint
                     with requests.get(final_url, headers=test_headers, stream=True, timeout=10, allow_redirects=False) as test_response:
                         if test_response.status_code == 206:  # Partial Content
-                            print(f"✅ [ANYMATIX RANGE] Server supports Range requests (tested with small range)")
+                            print(f"[ANYMATIX RANGE] Server supports Range requests (tested with small range)")
                             return True, file_size
                         else:
-                            print(f"❌ [ANYMATIX RANGE] Server doesn't support Range requests (got status {test_response.status_code})")
+                            print(f"[ANYMATIX RANGE] Server doesn't support Range requests (got status {test_response.status_code})")
                 except Exception as e:
-                    print(f"⚠️  [ANYMATIX RANGE] Range test failed: {e}")
+                    print(f"[ANYMATIX RANGE] Range test failed: {e}")
+                    # Don't raise here, just return False - this is expected for servers that don't support ranges
             
             return False, file_size
+    except requests.RequestException as e:
+        raise Exception(f"Failed to check range support for {url}: {e}") from e
     except Exception as e:
-        print(f"⚠️  [ANYMATIX RANGE] Range support check failed: {e}")
-        return False, None
+        raise Exception(f"Unexpected error checking range support for {url}: {e}") from e
 
 
 def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -518,7 +582,7 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
     """State-of-the-art parallel download with intelligent fallback"""
     
     if not REQUESTS_AVAILABLE:
-        return False
+        raise ImportError("requests library not available for parallel download")
     
     # Check server capabilities
     supports_ranges, total_size = check_range_support(url)
@@ -526,15 +590,15 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
     if not supports_ranges or not total_size:
         # For signed URLs (like Civitai), try a live range test during actual download
         if not supports_ranges and total_size:
-            print(f"🔍 Server capabilities unknown - will attempt range detection during download")
+            print(f"[ANYMATIX DOWNLOAD] Server capabilities unknown - will attempt range detection during download")
             # We'll try parallel anyway and fall back if it fails
         else:
-            print(f"❌ Parallel download not possible: supports_ranges={supports_ranges}, total_size={total_size}")
+            print(f"[ANYMATIX DOWNLOAD] Parallel download not possible: supports_ranges={supports_ranges}, total_size={total_size}")
             return False
         
     # Skip parallel for small files (< 5MB)
     if total_size and total_size < 5 * 1024 * 1024:
-        print(f"⏩ Skipping parallel for small file ({total_size//1024//1024}MB < 5MB)")
+        print(f"[ANYMATIX DOWNLOAD] Skipping parallel for small file ({total_size//1024//1024}MB < 5MB)")
         return False
         
     # Handle resume scenario
@@ -542,17 +606,20 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
         if local_file_size >= total_size:
             return True  # Already complete
         # For resume, we'll use traditional method for simplicity
-        print(f"📁 Resume scenario detected - using traditional download")
+        print(f"[ANYMATIX DOWNLOAD] Resume scenario detected - using traditional download")
         return False
     
     # Choose download strategy based on available dependencies
     try:
         # Try async method first (fastest) if available
         if AIOHTTP_AVAILABLE and AIOFILES_AVAILABLE:
-            print(f"🚀 Using async parallel download strategy")
+            print(f"[ANYMATIX DOWNLOAD] Using async parallel download strategy")
             async def run_async():
                 downloader = AsyncParallelDownloader(url, file_path, total_size, callback, max_connections)
-                return await downloader.download_async()
+                success = await downloader.download_async()
+                if not success:
+                    raise Exception(f"Async parallel download failed for {url}")
+                return success
             
             # Run async download
             try:
@@ -564,15 +631,18 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             return loop.run_until_complete(run_async())
         else:
             # Fallback to threaded parallel download
-            print(f"⚡ Using threaded parallel download strategy")
+            print(f"[ANYMATIX DOWNLOAD] Using threaded parallel download strategy")
             downloader = SegmentDownloader(url, file_path, total_size, callback, max_connections)
-            if downloader.download_parallel():
-                return downloader.assemble_file()
-            return False
+            if not downloader.download_parallel():
+                raise Exception(f"Threaded parallel download failed for {url}")
+            if not downloader.assemble_file():
+                raise Exception(f"Failed to assemble downloaded segments for {url}")
+            return True
         
     except Exception as e:
-        print(f"⚠️  Parallel download strategy failed: {e}")
-        return False
+        print(f"[ANYMATIX DOWNLOAD] Parallel download strategy failed: {e}")
+        # Re-raise the exception instead of returning False so it propagates to the node
+        raise Exception(f"Parallel download failed: {e}")  from e
 
 
 def delete_files(url, dir):
@@ -709,8 +779,9 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
         # STATE-OF-THE-ART PARALLEL DOWNLOAD ATTEMPT
         parallel_success = False
+        parallel_exception = None
         if local_file_size == 0 and data["file_size"] is not None:  # Only for fresh downloads
-            print(f"🚀 [ANYMATIX DOWNLOAD] Attempting parallel download for {data['file_name']} ({data['file_size']} bytes)")
+            print(f"[ANYMATIX DOWNLOAD] Attempting parallel download for {data['file_name']} ({data['file_size']} bytes)")
             try:
                 parallel_success = fetch_parallel(
                     effective, 
@@ -721,56 +792,77 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 )
                 if parallel_success:
                     mb_total = data["file_size"] / (1024 * 1024) if data["file_size"] else 0
-                    print(f"✅ [ANYMATIX DOWNLOAD] Parallel download completed successfully: {data['file_name']} ({mb_total:.0f}MB)")
+                    print(f"[ANYMATIX DOWNLOAD] Parallel download completed successfully: {data['file_name']} ({mb_total:.0f}MB)")
                     return file_path
                 else:
-                    print(f"⚠️  [ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
+                    print(f"[ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
-                print(f"⚠️  [ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to traditional: {e}")
+                print(f"[ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to traditional: {e}")
                 parallel_success = False
+                parallel_exception = e
 
         # TRADITIONAL FALLBACK (backwards compatible)
         if not parallel_success:
-            print(f"🔄 [ANYMATIX DOWNLOAD] Using traditional download for {data['file_name']}")
-            with open(file_path, 'ab') as file:
-                progress_bar = None
-                if TQDM_AVAILABLE and data["file_size"]:
-                    try:
-                        progress_bar = tqdm(total=data["file_size"], initial=local_file_size)
-                    except:
-                        progress_bar = None
-                    
-                def cb(chunk):
-                    nonlocal downloaded_size
-                    if (chunk):
-                        file.write(chunk)
-                        l = len(chunk)
-                        downloaded_size += l
-                        if progress_bar:
-                            progress_bar.update(l)
-                        if callback:
-                            callback(downloaded_size, data["file_size"])
-                        
-                        # Additional console progress for anymatix terminal
-                        if data["file_size"] and downloaded_size % (50 * 1024 * 1024) < l:  # Every 50MB
-                            mb_downloaded = downloaded_size / (1024 * 1024)
-                            mb_total = data["file_size"] / (1024 * 1024)
-                            percent = (downloaded_size / data["file_size"]) * 100
-                            print(f"📥 [ANYMATIX PROGRESS] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%)")
-                            
-                try:
-                    fetch(effective, session, cb, local_file_size)
-                finally:
-                    if progress_bar:
+            print(f"[ANYMATIX DOWNLOAD] Using traditional download for {data['file_name']}")
+            traditional_exception = None
+            try:
+                with open(file_path, 'ab') as file:
+                    progress_bar = None
+                    if TQDM_AVAILABLE and data["file_size"]:
                         try:
-                            progress_bar.close()
+                            progress_bar = tqdm(total=data["file_size"], initial=local_file_size)
                         except:
-                            pass
-                    
-                    # Final status message for anymatix terminal
-                    if downloaded_size == data["file_size"]:
-                        mb_final = downloaded_size / (1024 * 1024)
-                        print(f"✅ [ANYMATIX DOWNLOAD] Traditional download completed: {mb_final:.0f}MB")
+                            progress_bar = None
+                        
+                    def cb(chunk):
+                        nonlocal downloaded_size
+                        if (chunk):
+                            file.write(chunk)
+                            l = len(chunk)
+                            downloaded_size += l
+                            if progress_bar:
+                                progress_bar.update(l)
+                            if callback:
+                                callback(downloaded_size, data["file_size"])
+                            
+                            # Additional console progress for anymatix terminal
+                            if data["file_size"] and downloaded_size % (50 * 1024 * 1024) < l:  # Every 50MB
+                                mb_downloaded = downloaded_size / (1024 * 1024)
+                                mb_total = data["file_size"] / (1024 * 1024)
+                                percent = (downloaded_size / data["file_size"]) * 100
+                                print(f"[ANYMATIX PROGRESS] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%)")
+                                
+                    try:
+                        fetch(effective, session, cb, local_file_size)
+                    finally:
+                        if progress_bar:
+                            try:
+                                progress_bar.close()
+                            except:
+                                pass
+                        
+                        # Final status message for anymatix terminal
+                        if downloaded_size == data["file_size"]:
+                            mb_final = downloaded_size / (1024 * 1024)
+                            print(f"[ANYMATIX DOWNLOAD] Traditional download completed: {mb_final:.0f}MB")
+                            
+            except Exception as e:
+                traditional_exception = e
+                print(f"[ANYMATIX DOWNLOAD] Traditional download also failed: {e}")
+                
+                # If both parallel and traditional failed, raise the more serious exception
+                if parallel_exception and traditional_exception:
+                    # Prefer parallel exception if it's more descriptive, otherwise use traditional
+                    if "Range" in str(parallel_exception) or "connection" in str(parallel_exception).lower():
+                        raise parallel_exception
+                    else:
+                        raise traditional_exception
+                elif traditional_exception:
+                    raise traditional_exception
+                elif parallel_exception:
+                    raise parallel_exception
+                else:
+                    raise Exception(f"Both parallel and traditional download methods failed for {data['file_name']}")
 
         print("Model name:", data["file_name"])
 
