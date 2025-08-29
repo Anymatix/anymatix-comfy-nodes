@@ -83,6 +83,18 @@ class AnymatixSaveAnimatedMP4:
             "pix_fmt": "yuv420p",
             "crf": "28",
             "preset": "ultrafast"
+        },
+        "high quality": {
+            "codec": "libx264",
+            "profile": "high",
+            "level": "4.0", 
+            "pix_fmt": "yuv420p",
+            "crf": "15",  # Very high quality for client-side processing
+            "preset": "slow",  # Better compression
+            "keyint": "24",  # GOP size of 24 frames (1 second at 24fps)
+            "min_keyint": "12",  # Minimum keyframe interval
+            "sc_threshold": "0",  # Disable scene change detection for consistent GOP
+            "g": "24"  # Explicit GOP size
         }
     }
     
@@ -196,9 +208,44 @@ class AnymatixSaveAnimatedMP4:
                     '-tune', 'stillimage'  # Optimize for still image sequences
                 ]
                 
+                # Add GOP structure settings for high quality preset
+                if quality == "high quality":
+                    ffmpeg_cmd.extend([
+                        '-g', preset['g'],  # GOP size
+                        '-keyint_min', preset['min_keyint'],  # Minimum keyframe interval
+                        '-sc_threshold', preset['sc_threshold'],  # Scene change threshold
+                        '-force_key_frames', f'expr:gte(t,n_forced*{1.0/fps})'  # Force keyframes at regular intervals
+                    ])
+                
                 # Add preset if specified
                 if 'preset' in preset:
                     ffmpeg_cmd.extend(['-preset', preset['preset']])
+                
+                # Generate metadata file for high quality preset
+                metadata_path = None
+                if quality == "high quality":
+                    metadata_path = file_path.replace('.mp4', '_metadata.json')
+                    gop_size = int(preset['g'])
+                    total_frames = len(images)
+                    keyframe_positions = list(range(0, total_frames, gop_size))
+                    
+                    import json
+                    metadata = {
+                        "gop_size": gop_size,
+                        "fps": fps,
+                        "total_frames": total_frames,
+                        "keyframe_positions": keyframe_positions,
+                        "duration": total_frames / fps,
+                        "encoding": {
+                            "codec": preset['codec'],
+                            "profile": preset['profile'],
+                            "crf": preset['crf']
+                        }
+                    }
+                    
+                    with open(metadata_path, 'w') as f:
+                        json.dump(metadata, f, indent=2)
+                    print(f"Generated metadata file: {os.path.basename(metadata_path)}")
                 
                 # Add output file
                 ffmpeg_cmd.append(file_path)
