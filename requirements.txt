@@ -10,5 +10,10 @@ numpy>=1.19.0           # Required for image processing
 opencv-python>=4.5.0    # For faster image processing (fallback to PIL if not available)
 Pillow>=8.0.0          # Image processing fallback if OpenCV not available
 
+# High-performance parallel downloading (optional - graceful fallback if not available)
+aiohttp>=3.8.0         # Async HTTP client with HTTP/2 support for ultra-fast downloads
+aiofiles>=0.8.0        # Async file I/O for non-blocking operations
+
 # Note: imageio-ffmpeg will automatically download FFmpeg binaries
 # No manual FFmpeg installation required!
+# Note: aiohttp and aiofiles enable state-of-the-art parallel downloads but are optional

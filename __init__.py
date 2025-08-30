@@ -140,19 +140,131 @@ os.makedirs(outdir, exist_ok=True)
 
 @routes.get("/anymatix/reboot")
 async def serve_reboot(request):
-    print("anymatix: rebooting")
+    # Check if deep restart is requested
+    deep_restart = request.rel_url.query.get("deep", "false").lower() == "true"
+    
+    if deep_restart:
+        print("anymatix: scheduling deep restart (same PID, module reload)")
+        # Schedule the deep restart asynchronously
+        asyncio.create_task(deep_restart_after_delay(2))
+        return web.json_response({"status": "scheduled", "message": "Deep restart scheduled", "type": "deep"})
+    else:
+        print("anymatix: performing soft restart - clearing queue and freeing memory")
+        
+        try:
+            # Import the server instance to access internal methods
+            from server import PromptServer
+            server_instance = PromptServer.instance
+            
+            # 1. Interrupt any current processing
+            import nodes
+            nodes.interrupt_processing()
+            
+            # 2. Clear the queue
+            if hasattr(server_instance, 'prompt_queue'):
+                server_instance.prompt_queue.wipe_queue()
+                print("anymatix: queue cleared")
+            
+            # 3. Free memory and unload models
+            import comfy.model_management
+            comfy.model_management.soft_empty_cache()
+            comfy.model_management.unload_all_models()
+            print("anymatix: models unloaded and memory freed")
+            
+            # 4. Close and reopen websocket connections to refresh clients
+            if hasattr(server_instance, 'sockets'):
+                for sid in list(server_instance.sockets.keys()):
+                    try:
+                        await server_instance.sockets[sid].close()
+                    except:
+                        pass
+                server_instance.sockets.clear()
+                print("anymatix: websocket connections refreshed")
+            
+            # 5. Clear any remaining execution state
+            import execution
+            if hasattr(execution, 'current_executed'):
+                execution.current_executed.clear()
+                
+            print("anymatix: soft restart completed successfully")
+            return web.json_response({"status": "success", "message": "Soft restart completed", "type": "soft"})
+            
+        except Exception as e:
+            print(f"anymatix: error during soft restart: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-    # Schedule the reboot asynchronously
-    # Delay of 2 seconds (adjust as needed)
-    asyncio.create_task(reboot_after_delay(2))
 
-    # Return the response immediately
-    return web.Response(status=200)
+# DISABLED: This function creates a new process that escapes PowerShell job object control
+# async def reboot_after_delay(delay: int):
+#     await asyncio.sleep(delay)
+#     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-
-async def reboot_after_delay(delay: int):
+async def deep_restart_after_delay(delay: int):
+    """
+    Attempt a deeper restart by reloading core modules while keeping the same PID.
+    This maintains job object control while refreshing the ComfyUI state.
+    """
     await asyncio.sleep(delay)
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    
+    try:
+        print("anymatix: performing deep restart - reloading core modules")
+        
+        # 1. Stop all current processing
+        import nodes
+        nodes.interrupt_processing()
+        
+        # 2. Clear execution state
+        import execution
+        if hasattr(execution, 'current_executed'):
+            execution.current_executed.clear()
+            
+        # 3. Clear model cache
+        import comfy.model_management
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
+        
+        # 4. Clear node mappings and reload
+        nodes.NODE_CLASS_MAPPINGS.clear()
+        nodes.NODE_DISPLAY_NAME_MAPPINGS.clear()
+        
+        # 5. Reload core modules
+        import importlib
+        import sys
+        
+        modules_to_reload = [
+            'nodes',
+            'execution', 
+            'comfy.model_management',
+            'folder_paths'
+        ]
+        
+        for module_name in modules_to_reload:
+            if module_name in sys.modules:
+                try:
+                    importlib.reload(sys.modules[module_name])
+                    print(f"anymatix: reloaded {module_name}")
+                except Exception as e:
+                    print(f"anymatix: failed to reload {module_name}: {e}")
+        
+        # 6. Re-initialize nodes
+        import nodes
+        nodes.init_extra_nodes()
+        
+        # 7. Clear server state
+        from server import PromptServer
+        server_instance = PromptServer.instance
+        if hasattr(server_instance, 'prompt_queue'):
+            server_instance.prompt_queue.wipe_queue()
+            server_instance.prompt_queue.wipe_history()
+            
+        print("anymatix: deep restart completed - same PID maintained")
+        
+    except Exception as e:
+        print(f"anymatix: error during deep restart: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @routes.post("/anymatix/expunge")
@@ -204,7 +316,6 @@ async def serve_cache_size(request):
 async def serve_delete(request):
     print("anymatix: deleting resource")
     data = await request.json()
-    print("anymatix:", data)
     url = data["url"]
     delete_files(url, folder_paths.models_dir)
     return web.Response(status=200)
@@ -220,7 +331,7 @@ async def serve_file(request):
     if basedir in allowed_dirs:
         # TODO: the check on getcwd is plain wrong (if the cwd is not what I expected). Determine from the current script?
         file_path = os.path.abspath(f"{basedir}/{request.match_info['filename']}")
-        base = f"{os.path.abspath(os.getcwd())}/{basedir}"
+        base = os.path.abspath(os.path.join(os.getcwd(), basedir))
         if (
             file_path.startswith(base)
             and os.path.isfile(file_path)
