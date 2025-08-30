@@ -43,6 +43,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
     "AnymatixImageToVideo": AnymatixImageToVideo,
     "AnymatixSaveAnimatedMP4": AnymatixSaveAnimatedMP4,
+    "AnymatixUNETLoaderGGUF": AnymatixUNETLoaderGGUF,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -59,6 +60,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
     "AnymatixImageToVideo": "Anymatix Image To Video",
     "AnymatixSaveAnimatedMP4": "Anymatix Save Animated MP4",
+    "AnymatixUNETLoaderGGUF": "Anymatix UNET Loader GGUF",
 }
 
 
