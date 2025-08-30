@@ -1,5 +1,6 @@
 import json
 import os
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import re
 
 import requests
@@ -9,7 +10,7 @@ import comfy.utils
 import folder_paths
 from .fetch import download_file
 from spandrel import ModelLoader, ImageModelDescriptor
-from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader
+from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, UNETLoaderGGUF
 import os
 
 CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
@@ -60,6 +61,17 @@ class AnymatixUNETLoader(UNETLoader):
     def INPUT_TYPES(s):
         return {"required": { "unet_name": ("STRING", ),
                               "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],)
+                             }}
+
+    CATEGORY = "Anymatix"
+
+    def load_unet(self, unet_name, weight_dtype):
+        return super().load_unet(os.path.basename(unet_name), weight_dtype)
+
+class AnymatixUNETLoaderGGUF(UNETLoaderGGUF):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "unet_name": ("STRING", )
                              }}
 
     CATEGORY = "Anymatix"
@@ -209,6 +221,10 @@ class AnymatixCheckpointFetcher:
                         "default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
                     },
                 ),
+            },
+            "optional": {
+                # Optional auth query tail, e.g. "token=xxxx". Not persisted; only used at runtime.
+                "auth": ("STRING", {}),
             }
         }
 
@@ -216,7 +232,7 @@ class AnymatixCheckpointFetcher:
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
 
-    def download_model(self, url):
+    def download_model(self, url, auth=None):
         pbar = comfy.utils.ProgressBar(1000)
         progress = 0
         pbar.update_absolute(progress, 1000)
@@ -247,10 +263,54 @@ class AnymatixCheckpointFetcher:
                 return expand_info_civitai(url)
             return None
 
-        model_name = download_file(
-            url=url, dir=CHECKPOINTS_DIR, callback=callback, expand_info=expand_info
-        )
-        return (model_name,)
+        # Build base/effective URLs. Prefer explicit auth arg; else, preserve legacy token-in-URL behavior.
+        try:
+            p = urlparse(url)
+            pairs = parse_qsl(p.query, keep_blank_values=True)
+            non_auth = []
+            legacy_auth_pairs = []
+            for k, v in pairs:
+                if k == "token":
+                    legacy_auth_pairs.append((k, v))
+                else:
+                    non_auth.append((k, v))
+            base_query = urlencode(non_auth)
+            base_url = urlunparse(p._replace(query=base_query))
+
+            # Decide which auth to use: explicit auth arg wins; otherwise use legacy token found in URL
+            if auth is not None and len(str(auth)) > 0:
+                to_add = parse_qsl(str(auth), keep_blank_values=True)
+                effective_query = urlencode(non_auth + to_add)
+                effective_url = urlunparse(p._replace(query=effective_query))
+                auth_tail = str(auth)
+            elif legacy_auth_pairs:
+                effective_query = urlencode(non_auth + legacy_auth_pairs)
+                effective_url = urlunparse(p._replace(query=effective_query))
+                auth_tail = urlencode(legacy_auth_pairs)
+            else:
+                effective_url = base_url
+                auth_tail = None
+        except Exception:
+            # Fallback to original behavior if parsing fails
+            base_url = url
+            effective_url = url
+            auth_tail = None
+
+        try:
+            model_name = download_file(
+                url=base_url,
+                dir=CHECKPOINTS_DIR,
+                callback=callback,
+                expand_info=expand_info,
+                effective_url=effective_url,
+                redact_append=auth_tail,
+            )
+            return (model_name,)
+        except Exception as e:
+            # Enhance error message with context for better debugging
+            error_msg = f"AnymatixCheckpointFetcher failed to download from {base_url}: {e}"
+            print(f"[ANYMATIX ERROR] {error_msg}")
+            raise Exception(error_msg) from e
 
 
 dirmap = {
@@ -260,6 +320,7 @@ dirmap = {
     "upscale": "upscale_models",
     "vae": "vae",
     "diffusion_model": "diffusion_models",
+    "diffusion_models/GGUF": "diffusion_models",
     "text_encoders": "text_encoders",
     "clip_vision": "clip_vision",
 }
@@ -271,7 +332,8 @@ class AnymatixFetcher:
         return {
             "required": {
                 # "url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),
-                "url": ({"url": "STRING", "type": "STRING"}, {}),
+                # Keep declared fields minimal; auth (if present) is accepted at runtime but not exposed in UI
+                "url": ({"url": "STRING", "type": "STRING", "auth": "STRING"}, {}),
             }
         }
 
@@ -280,7 +342,12 @@ class AnymatixFetcher:
     CATEGORY = "Anymatix"
 
     def download_model(self, url):
-        print("download model", type(url), url)
+        # Avoid printing tokens; only show safe info
+        try:
+            safe_preview = {k: ("<redacted>" if k == "auth" else v) for k, v in url.items()}
+            print("download model", type(url), safe_preview)
+        except Exception:
+            pass
         if url["type"] in dirmap:
             dir = os.path.join(folder_paths.models_dir, dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
@@ -313,8 +380,32 @@ class AnymatixFetcher:
                     return expand_info_civitai(url)
                 return None
 
-            model_name = download_file(
-                url=url["url"], dir=dir, callback=callback, expand_info=expand_info
-            )
-            print("fetched model", model_name)
-            return (model_name,)
+            base_url = url.get("url")
+            auth = url.get("auth")
+            if auth is not None and len(auth) > 0:
+                # Robustly append query parameters using urllib
+                p = urlparse(base_url)
+                existing = parse_qsl(p.query, keep_blank_values=True)
+                to_add = parse_qsl(auth, keep_blank_values=True)
+                new_query = urlencode(existing + to_add)
+                effective = urlunparse(p._replace(query=new_query))
+            else:
+                effective = base_url
+
+            try:
+                model_name = download_file(
+                    url=base_url,
+                    dir=dir,
+                    callback=callback,
+                    expand_info=expand_info,
+                    effective_url=effective,
+                    redact_append=auth,
+                )
+                print("fetched model", model_name)
+                return (model_name,)
+            except Exception as e:
+                # Enhance error message with context for better debugging
+                model_type = url.get("type", "unknown")
+                error_msg = f"AnymatixFetcher failed to download {model_type} model from {base_url}: {e}"
+                print(f"[ANYMATIX ERROR] {error_msg}")
+                raise Exception(error_msg) from e
