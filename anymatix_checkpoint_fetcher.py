@@ -10,7 +10,7 @@ import comfy.utils
 import folder_paths
 from .fetch import download_file
 from spandrel import ModelLoader, ImageModelDescriptor
-from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader
+from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -88,6 +88,20 @@ class AnymatixUNETLoaderGGUF(gguf_nodes.UnetLoaderGGUF):
 
     def load_unet(self, unet_name, weight_dtype):
         return super().load_unet(os.path.basename(unet_name), weight_dtype)
+
+class AnymatixLoraLoaderModelOnly(LoraLoaderModelOnly):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "lora_name": ("STRING", ),
+                              "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+                              }
+                }
+
+    CATEGORY = "Anymatix"
+
+    def load_lora(self, lora_name, strength):
+        return super().load_lora(os.path.basename(lora_name), strength)
 
 class AnymatixUpscaleModelLoader:
     @classmethod
