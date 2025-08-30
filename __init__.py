@@ -22,6 +22,7 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixUNETLoader,
     AnymatixVAELoader,
     AnymatixCLIPVisionLoader,
+    AnymatixUNETLoaderGGUF,
 )
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage

@@ -10,8 +10,18 @@ import comfy.utils
 import folder_paths
 from .fetch import download_file
 from spandrel import ModelLoader, ImageModelDescriptor
-from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, UNETLoaderGGUF
-import os
+from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader
+
+gguf_nodes_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
+)
+
+import sys
+custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if custom_nodes_path not in sys.path:
+    sys.path.insert(0, custom_nodes_path)
+import ComfyUI_GGUF.nodes as gguf_nodes
+
 
 CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
 
@@ -68,7 +78,7 @@ class AnymatixUNETLoader(UNETLoader):
     def load_unet(self, unet_name, weight_dtype):
         return super().load_unet(os.path.basename(unet_name), weight_dtype)
 
-class AnymatixUNETLoaderGGUF(UNETLoaderGGUF):
+class AnymatixUNETLoaderGGUF(gguf_nodes.UnetLoaderGGUF):
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "unet_name": ("STRING", )
