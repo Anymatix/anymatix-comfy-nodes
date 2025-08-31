@@ -86,8 +86,8 @@ class AnymatixUNETLoaderGGUF(gguf_nodes.UnetLoaderGGUF):
 
     CATEGORY = "Anymatix"
 
-    def load_unet(self, unet_name, weight_dtype):
-        return super().load_unet(os.path.basename(unet_name), weight_dtype)
+    def load_unet(self, unet_name):
+        return super().load_unet(os.path.basename(unet_name))
 
 class AnymatixLoraLoaderModelOnly(LoraLoaderModelOnly):
     @classmethod
@@ -100,8 +100,8 @@ class AnymatixLoraLoaderModelOnly(LoraLoaderModelOnly):
 
     CATEGORY = "Anymatix"
 
-    def load_lora(self, lora_name, strength):
-        return super().load_lora(os.path.basename(lora_name), strength)
+    def load_lora(self, model, lora_name, strength):
+        return super().load_lora(model, os.path.basename(lora_name), strength)
 
 class AnymatixUpscaleModelLoader:
     @classmethod
