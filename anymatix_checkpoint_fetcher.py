@@ -8,7 +8,16 @@ import comfy
 import comfy.sd
 import comfy.utils
 import folder_paths
-from .fetch import download_file
+try:
+    # When loaded as a package inside ComfyUI, use relative import
+    from .fetch import download_file
+except Exception:
+    # When running this file directly for testing, fall back to absolute import
+    try:
+        from fetch import download_file
+    except Exception:
+        # Provide a helpful error when import truly fails
+        raise
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly
 
@@ -20,8 +29,12 @@ import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if custom_nodes_path not in sys.path:
     sys.path.insert(0, custom_nodes_path)
-    sys.path.insert(0, custom_nodes_path + "/ComfyUI-GGUF")
-import nodes as gguf_nodes
+
+# Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
+import importlib.util
+spec = importlib.util.spec_from_file_location("gguf_nodes", gguf_nodes_path)
+gguf_nodes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gguf_nodes)
 
 CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
 
