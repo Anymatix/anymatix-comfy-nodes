@@ -20,8 +20,8 @@ import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if custom_nodes_path not in sys.path:
     sys.path.insert(0, custom_nodes_path)
-import ComfyUI_GGUF.nodes as gguf_nodes
-
+    sys.path.insert(0, custom_nodes_path + "/ComfyUI-GGUF")
+import nodes as gguf_nodes
 
 CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
 
@@ -433,3 +433,19 @@ class AnymatixFetcher:
                 error_msg = f"AnymatixFetcher failed to download {model_type} model from {base_url}: {e}"
                 print(f"[ANYMATIX ERROR] {error_msg}")
                 raise Exception(error_msg) from e
+
+
+if __name__ == "__main__":
+    # Quick test for AnymatixFetcher
+    fetcher = AnymatixFetcher()
+    test_url = {
+        "url": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors",
+        "type": "checkpoint",
+        "auth": ""
+    }
+    try:
+        result = fetcher.download_model(test_url)
+        print("Test fetch result:", result)
+    except Exception as e:
+        print("Test fetch failed:", e)
+
