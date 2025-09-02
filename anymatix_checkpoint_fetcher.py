@@ -32,8 +32,27 @@ if custom_nodes_path not in sys.path:
 
 # Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
 import importlib.util
-spec = importlib.util.spec_from_file_location("gguf_nodes", gguf_nodes_path)
+import types
+
+# Load the sibling ComfyUI-GGUF package as a proper package so that its
+# relative imports (e.g. `from .ops import ...`) work when we load the
+# `nodes.py` file directly. The on-disk folder name contains a hyphen so we
+# expose it under a valid Python package name `ComfyUI_GGUF` and register it
+# in sys.modules with an appropriate __path__ before executing the module.
+pkg_name = "ComfyUI_GGUF"
+pkg_path = os.path.dirname(gguf_nodes_path)
+if pkg_name not in sys.modules:
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [pkg_path]
+    sys.modules[pkg_name] = pkg
+
+# Import the nodes module as a submodule of our synthetic package so
+# relative imports inside it resolve to files in the same directory.
+nodes_mod_name = pkg_name + ".nodes"
+spec = importlib.util.spec_from_file_location(nodes_mod_name, gguf_nodes_path)
 gguf_nodes = importlib.util.module_from_spec(spec)
+gguf_nodes.__package__ = pkg_name
+sys.modules[nodes_mod_name] = gguf_nodes
 spec.loader.exec_module(gguf_nodes)
 
 CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
