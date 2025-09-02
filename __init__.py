@@ -74,10 +74,58 @@ allowed_dirs = ["output", "input", "models"]
 
 routes = PromptServer.instance.routes
 
+# Heartbeat monitoring state (timer-reset model)
+_heartbeat_timeout_seconds: int = 300
+_heartbeat_timer_task: asyncio.Task | None = None
+_heartbeat_lock = asyncio.Lock()
+
+
+async def _heartbeat_timer(timeout_seconds: int):
+    """Wait timeout_seconds and then exit the process.
+
+    This task is created on first heartbeat and recreated on each subsequent
+    heartbeat. If it ever completes, it will force-exit the process.
+    """
+    try:
+        await asyncio.sleep(timeout_seconds)
+        print(f"anymatix: heartbeat timeout (no heartbeat for {timeout_seconds}s) - exiting")
+        os._exit(1)
+    except asyncio.CancelledError:
+        # Timer was reset/cancelled by a newer heartbeat; that's normal
+        return
+    except Exception as e:
+        print(f"anymatix: heartbeat timer error: {e}")
+
 
 @routes.get("/anymatix/log")
 async def get_log(request):
     return web.json_response(list(app.logger.get_logs()))
+
+
+@routes.post('/anymatix/heartbeat')
+async def serve_heartbeat(request):
+    """Receive heartbeat pings from the Anymatix app.
+
+    Each POST resets the server-side watchdog timer. The endpoint returns the
+    configured number of seconds after which the process will exit if no
+    further heartbeats arrive. The timeout is server-configured only.
+    """
+    global _heartbeat_timer_task, _heartbeat_timeout_seconds
+    try:
+        # Reset the watchdog timer: cancel previous timer task and create a new one
+        async with _heartbeat_lock:
+            if _heartbeat_timer_task is not None:
+                try:
+                    _heartbeat_timer_task.cancel()
+                except Exception:
+                    pass
+            loop = asyncio.get_event_loop()
+            _heartbeat_timer_task = loop.create_task(_heartbeat_timer(_heartbeat_timeout_seconds))
+        # Return the server-configured timeout so the client can schedule refreshes
+        return web.json_response({"status": "ok", "seconds_until_death": _heartbeat_timeout_seconds})
+    except Exception as e:
+        print(f"anymatix: heartbeat endpoint error: {e}")
+        return web.json_response({"status": "error", "error": str(e)}, status=500)
 
 
 @routes.post("/anymatix/uploadAsset")
