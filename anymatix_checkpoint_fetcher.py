@@ -19,7 +19,7 @@ except Exception:
         # Provide a helpful error when import truly fails
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
-from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly
+from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -97,6 +97,23 @@ class AnymatixCLIPLoader(CLIPLoader):
 
     def load_clip(self, clip_name, type="stable_diffusion", device="default"):
         return super().load_clip(os.path.basename(clip_name), type, device)
+
+class AnymatixDualCLIPLoader(DualCLIPLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "clip_name1": ("STRING", ),
+                              "clip_name1": ("STRING", ),
+                              "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream"], ),
+                            },
+                "optional": {
+                    "device": (["default", "cpu"], {"advanced": True}),
+                            }
+                }
+
+    CATEGORY = "Anymatix"
+
+    def load_clip(self, clip_name1, clip_name2, type = "flux", device="default"):
+        return super().load_clip(os.path.basename(clip_name1), os.path.basename(clip_name2), type, device)
 
 class AnymatixUNETLoader(UNETLoader):
     @classmethod
