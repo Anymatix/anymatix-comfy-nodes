@@ -20,6 +20,7 @@ except Exception:
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
+from comfy_extras.nodes_audio_encoder import AudioEncoderLoader
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -116,6 +117,15 @@ class AnymatixDualCLIPLoader(DualCLIPLoader):
     def load_clip(self, clip_name1, clip_name2, type = "flux", device="default"):
         return super().load_clip(os.path.basename(clip_name1), os.path.basename(clip_name2), type, device)
 
+class AnymatixAudioEncoderLoader(AudioEncoderLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "audio_encoder_name": ("STRING", ),
+                             }}
+    CATEGORY = "Anymatix"
+    
+    def load_model(self, audio_encoder_name):
+        return super().load_model(os.path.basename(audio_encoder_name))
 class AnymatixUNETLoader(UNETLoader):
     @classmethod
     def INPUT_TYPES(s):
