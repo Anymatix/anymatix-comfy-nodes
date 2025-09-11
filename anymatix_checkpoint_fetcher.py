@@ -98,6 +98,7 @@ class AnymatixCLIPLoader(CLIPLoader):
     def load_clip(self, clip_name, type="stable_diffusion", device="default"):
         return super().load_clip(os.path.basename(clip_name), type, device)
 
+AnymatixCLIPLoader2=AnymatixCLIPLoader
 class AnymatixDualCLIPLoader(DualCLIPLoader):
     @classmethod
     def INPUT_TYPES(s):
