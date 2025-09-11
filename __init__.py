@@ -24,7 +24,8 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixCLIPVisionLoader,
     AnymatixUNETLoaderGGUF,
     AnymatixLoraLoaderModelOnly,
-    AnymatixDualCLIPLoader
+    AnymatixDualCLIPLoader,
+    AnymatixCLIPLoader2
 )
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
@@ -48,6 +49,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixUNETLoaderGGUF": AnymatixUNETLoaderGGUF,
     "AnymatixLoraLoaderModelOnly": AnymatixLoraLoaderModelOnly,
     "AnymatixDualCLIPLoader": AnymatixDualCLIPLoader,
+    "AnymatixCLIPLoader2": AnymatixCLIPLoader2,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -67,6 +69,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixUNETLoaderGGUF": "Anymatix UNET Loader GGUF",
     "AnymatixLoraLoaderModelOnly": "Anymatix Lora Loader Model Only",
     "AnymatixDualCLIPLoader": "Anymatix Dual CLIP Loader",
+    "AnymatixCLIPLoader2": "Anymatix CLIP Loader 2",
 }
 
 
