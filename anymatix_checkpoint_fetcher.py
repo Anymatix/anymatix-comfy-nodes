@@ -86,7 +86,7 @@ class AnymatixCLIPLoader(CLIPLoader):
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": ("STRING", ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
