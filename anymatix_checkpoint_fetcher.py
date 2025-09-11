@@ -407,6 +407,7 @@ dirmap = {
     "diffusion_models/GGUF": "diffusion_models",
     "text_encoders": "text_encoders",
     "clip_vision": "clip_vision",
+    "audio_encoder": "audio_encoders",
 }
 
 
