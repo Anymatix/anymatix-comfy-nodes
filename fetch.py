@@ -761,9 +761,14 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             data["file_name"] = f"{x[0]}_{url_hash}" + \
                 ('.' + '.'.join(x[1:]) if len(x) > 1 else "")
             if expand_info:
-                info = expand_info(url)
-                if info is not None:
-                    data["data"] = info
+                try:
+                    info = expand_info(url)
+                    if info is not None:
+                        data["data"] = info
+                except Exception as e:
+                    print(f"[WARNING] Failed to fetch model info (non-critical): {e}")
+                    print(f"[WARNING] Model download will continue without metadata")
+                    # Continue with download anyway - metadata is not essential
             with open(store_path, 'w') as file:
                 json.dump(data, file, indent=4)
 

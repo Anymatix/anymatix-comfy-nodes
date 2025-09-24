@@ -512,7 +512,10 @@ class AnymatixFetcher:
                 print(f"[ANYMATIX ERROR] {user_msg}")
                 print(f"[ANYMATIX DEBUG] Original error: {error_str}")
                 print(f"[ANYMATIX DEBUG] URL: {base_url}")
-                raise Exception(user_msg) from e
+                
+                # Include URL in user message for better debugging
+                user_msg_with_url = f"{user_msg}\nURL: {base_url}"
+                raise Exception(user_msg_with_url) from e
 
 
 if __name__ == "__main__":
