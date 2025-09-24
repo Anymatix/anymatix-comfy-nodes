@@ -878,8 +878,49 @@ def expand_info_civitai(url):
     else:
         return None
     model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
-    with requests.Session() as session:
-        return requests.get(model_info_url, allow_redirects=True).json()
+    
+    try:
+        with requests.Session() as session:
+            response = requests.get(model_info_url, allow_redirects=True, timeout=30)
+            
+            # Check if the response is successful
+            if response.status_code == 200:
+                # Check if response has content
+                if response.text.strip():
+                    try:
+                        return response.json()
+                    except ValueError as json_error:
+                        print(f"[WARNING] Failed to parse Civitai model info JSON for model {model_id}: {json_error}")
+                        print(f"[WARNING] Response content (first 200 chars): {response.text[:200]}")
+                        return None
+                else:
+                    print(f"[WARNING] Empty response from Civitai API for model {model_id}")
+                    return None
+            elif response.status_code == 404:
+                print(f"[WARNING] Model {model_id} not found on Civitai (404)")
+                return None
+            elif response.status_code == 403:
+                print(f"[WARNING] Access denied to model {model_id} on Civitai (403) - model may be private or require authentication")
+                return None
+            elif response.status_code == 429:
+                print(f"[WARNING] Rate limited by Civitai API for model {model_id} (429) - too many requests")
+                return None
+            else:
+                print(f"[WARNING] Civitai API returned status {response.status_code} for model {model_id}")
+                return None
+                
+    except requests.exceptions.Timeout:
+        print(f"[WARNING] Timeout while fetching model info from Civitai for model {model_id}")
+        return None
+    except requests.exceptions.ConnectionError as conn_error:
+        print(f"[WARNING] Connection error while fetching model info from Civitai for model {model_id}: {conn_error}")
+        return None
+    except requests.exceptions.RequestException as req_error:
+        print(f"[WARNING] Request error while fetching model info from Civitai for model {model_id}: {req_error}")
+        return None
+    except Exception as e:
+        print(f"[WARNING] Unexpected error while fetching model info from Civitai for model {model_id}: {e}")
+        return None
 
 
 def expand_info(url):

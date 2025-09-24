@@ -491,9 +491,28 @@ class AnymatixFetcher:
             except Exception as e:
                 # Enhance error message with context for better debugging
                 model_type = url.get("type", "unknown")
-                error_msg = f"AnymatixFetcher failed to download {model_type} model from {base_url}: {e}"
-                print(f"[ANYMATIX ERROR] {error_msg}")
-                raise Exception(error_msg) from e
+                
+                # Create user-friendly error messages based on common error patterns
+                error_str = str(e)
+                if "Expecting value: line 1 column 1 (char 0)" in error_str:
+                    user_msg = f"Failed to download {model_type} model: The model information could not be retrieved from Civitai. This may be due to network issues, rate limiting, or the model being private/unavailable."
+                elif "timeout" in error_str.lower():
+                    user_msg = f"Failed to download {model_type} model: The download timed out. Please check your internet connection and try again."
+                elif "connection" in error_str.lower():
+                    user_msg = f"Failed to download {model_type} model: Could not connect to the download server. Please check your internet connection."
+                elif "404" in error_str or "not found" in error_str.lower():
+                    user_msg = f"Failed to download {model_type} model: The model was not found on the server. It may have been moved or deleted."
+                elif "403" in error_str or "forbidden" in error_str.lower():
+                    user_msg = f"Failed to download {model_type} model: Access denied. The model may be private or require authentication."
+                elif "429" in error_str or "rate limit" in error_str.lower():
+                    user_msg = f"Failed to download {model_type} model: Too many requests. Please wait a moment and try again."
+                else:
+                    user_msg = f"Failed to download {model_type} model: {e}"
+                
+                print(f"[ANYMATIX ERROR] {user_msg}")
+                print(f"[ANYMATIX DEBUG] Original error: {error_str}")
+                print(f"[ANYMATIX DEBUG] URL: {base_url}")
+                raise Exception(user_msg) from e
 
 
 if __name__ == "__main__":
