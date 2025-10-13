@@ -408,6 +408,7 @@ dirmap = {
     "text_encoders": "text_encoders",
     "clip_vision": "clip_vision",
     "audio_encoder": "audio_encoders",
+    "sam2": "sam2",
 }
 
 
@@ -516,6 +517,113 @@ class AnymatixFetcher:
                 # Include URL in user message for better debugging
                 user_msg_with_url = f"{user_msg}\nURL: {base_url}"
                 raise Exception(user_msg_with_url) from e
+
+
+# Attribution: Based on DownloadAndLoadSAM2Model from
+# https://github.com/kijai/ComfyUI-segment-anything-2
+# Original code licensed under Apache 2.0
+# Modified for Anymatix fetcher pattern integration
+class AnymatixSAM2Loader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "sam2_name": ("STRING", ),
+                "segmentor": (["single_image", "video", "automaskgenerator"], ),
+                "device": (["cuda", "cpu", "mps"], ),
+                "precision": (["fp16", "bf16", "fp32"], ),
+            }
+        }
+
+    RETURN_TYPES = ("SAM2MODEL",)
+    RETURN_NAMES = ("sam2_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "Anymatix"
+    DESCRIPTION = "Loads a SAM2 segmentation model from a fetched file"
+
+    def load_model(self, sam2_name, segmentor, device, precision):
+        import torch
+
+        sam2_nodes_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "ComfyUI-segment-anything-2")
+        )
+        if os.path.exists(sam2_nodes_path) and sam2_nodes_path not in sys.path:
+            sys.path.insert(0, sam2_nodes_path)
+
+        try:
+            from load_model import load_model as sam2_load_model
+        except ImportError:
+            raise Exception(
+                "ComfyUI-segment-anything-2 not found. "
+                "Please install it from https://github.com/kijai/ComfyUI-segment-anything-2"
+            )
+
+        if precision != 'fp32' and device == 'cpu':
+            raise ValueError("fp16 and bf16 are not supported on cpu")
+
+        if device == "cuda":
+            if torch.cuda.get_device_properties(0).major >= 8:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+        device_obj = {"cuda": torch.device("cuda"), "cpu": torch.device("cpu"), "mps": torch.device("mps")}[device]
+
+        model_path = os.path.basename(sam2_name)
+
+        if precision != 'fp32' and "2.1" in model_path:
+            base_name, extension = model_path.rsplit('.', 1)
+            model_path = f"{base_name}-fp16.{extension}"
+
+        sam2_models_dir = os.path.join(folder_paths.models_dir, "sam2")
+        full_model_path = os.path.join(sam2_models_dir, model_path)
+
+        if not os.path.exists(full_model_path):
+            raise FileNotFoundError(
+                f"SAM2 model not found at {full_model_path}. "
+                f"Make sure AnymatixFetcher has downloaded it first."
+            )
+
+        script_directory = os.path.dirname(sam2_nodes_path)
+        model_mapping = {
+            "2.0": {
+                "base": "sam2_hiera_b+.yaml",
+                "large": "sam2_hiera_l.yaml",
+                "small": "sam2_hiera_s.yaml",
+                "tiny": "sam2_hiera_t.yaml"
+            },
+            "2.1": {
+                "base": "sam2.1_hiera_b+.yaml",
+                "large": "sam2.1_hiera_l.yaml",
+                "small": "sam2.1_hiera_s.yaml",
+                "tiny": "sam2.1_hiera_t.yaml"
+            }
+        }
+
+        version = "2.1" if "2.1" in model_path else "2.0"
+        model_cfg_path = next(
+            (os.path.join(script_directory, "sam2_configs", cfg)
+             for key, cfg in model_mapping[version].items() if key in model_path),
+            None
+        )
+
+        if not model_cfg_path:
+            raise ValueError(f"Could not determine config for model: {model_path}")
+
+        print(f"Loading SAM2 model from: {full_model_path}")
+        print(f"Using config: {model_cfg_path}")
+
+        model = sam2_load_model(full_model_path, model_cfg_path, segmentor, dtype, device_obj)
+
+        sam2_model = {
+            'model': model,
+            'dtype': dtype,
+            'device': device_obj,
+            'segmentor': segmentor,
+            'version': version
+        }
+
+        return (sam2_model,)
 
 
 if __name__ == "__main__":

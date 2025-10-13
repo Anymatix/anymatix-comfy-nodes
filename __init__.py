@@ -27,6 +27,7 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixDualCLIPLoader,
     AnymatixCLIPLoader2,
     AnymatixAudioEncoderLoader,
+    AnymatixSAM2Loader,
 )
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
@@ -52,6 +53,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixDualCLIPLoader": AnymatixDualCLIPLoader,
     "AnymatixCLIPLoader2": AnymatixCLIPLoader2,
     "AnymatixAudioEncoderLoader": AnymatixAudioEncoderLoader,
+    "AnymatixSAM2Loader": AnymatixSAM2Loader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -73,6 +75,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixDualCLIPLoader": "Anymatix Dual CLIP Loader",
     "AnymatixCLIPLoader2": "Anymatix CLIP Loader 2",
     "AnymatixAudioEncoderLoader": "Anymatix Audio Encoder Loader",
+    "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
 }
 
 
