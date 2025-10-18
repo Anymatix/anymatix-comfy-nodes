@@ -553,6 +553,9 @@ class AnymatixFetcher:
                     user_msg = f"Failed to download {model_type} model: Access denied. The model may be private or require authentication."
                 elif "429" in error_str or "rate limit" in error_str.lower():
                     user_msg = f"Failed to download {model_type} model: Too many requests. Please wait a moment and try again."
+                elif "Errno 28" in error_str or "No space left on device" in error_str:
+                    storage_path = folder_paths.models_dir
+                    user_msg = f"Failed to download {model_type} model: No space left on device.\n[ANYMATIX_STORAGE_FULL:{storage_path}]"
                 else:
                     user_msg = f"Failed to download {model_type} model: {e}"
                 

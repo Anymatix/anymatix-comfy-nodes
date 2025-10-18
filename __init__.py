@@ -210,6 +210,13 @@ outdir = f"{folder_paths.output_directory}/anymatix/results"
 os.makedirs(outdir, exist_ok=True)
 
 
+@routes.get("/anymatix/storage_location")
+async def serve_storage_location(request):
+    return web.json_response({
+        "models_dir": folder_paths.models_dir
+    })
+
+
 @routes.get("/anymatix/reboot")
 async def serve_reboot(request):
     # Check if deep restart is requested
