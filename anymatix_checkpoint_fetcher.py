@@ -21,6 +21,8 @@ except Exception:
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
 from comfy_extras.nodes_audio_encoder import AudioEncoderLoader
+from comfy_extras.nodes_sd3 import TripleCLIPLoader
+from comfy_extras.nodes_hidream import QuadrupleCLIPLoader
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -104,7 +106,7 @@ class AnymatixDualCLIPLoader(DualCLIPLoader):
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name1": ("STRING", ),
-                              "clip_name1": ("STRING", ),
+                              "clip_name2": ("STRING", ),
                               "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream"], ),
                             },
                 "optional": {
@@ -116,6 +118,48 @@ class AnymatixDualCLIPLoader(DualCLIPLoader):
 
     def load_clip(self, clip_name1, clip_name2, type = "flux", device="default"):
         return super().load_clip(os.path.basename(clip_name1), os.path.basename(clip_name2), type, device)
+
+class AnymatixTripleCLIPLoader(TripleCLIPLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "clip_name1": ("STRING", ),
+                "clip_name2": ("STRING", ),
+                "clip_name3": ("STRING", ),
+            }
+        }
+
+    CATEGORY = "Anymatix"
+
+    def execute(self, clip_name1, clip_name2, clip_name3):
+        return super().execute(
+            os.path.basename(clip_name1),
+            os.path.basename(clip_name2),
+            os.path.basename(clip_name3)
+        )
+
+class AnymatixQuadrupleCLIPLoader(QuadrupleCLIPLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "clip_name1": ("STRING", ),
+                "clip_name2": ("STRING", ),
+                "clip_name3": ("STRING", ),
+                "clip_name4": ("STRING", ),
+            }
+        }
+
+    CATEGORY = "Anymatix"
+
+    def execute(self, clip_name1, clip_name2, clip_name3, clip_name4):
+        return super().execute(
+            os.path.basename(clip_name1),
+            os.path.basename(clip_name2),
+            os.path.basename(clip_name3),
+            os.path.basename(clip_name4)
+        )
 
 class AnymatixAudioEncoderLoader(AudioEncoderLoader):
     @classmethod
