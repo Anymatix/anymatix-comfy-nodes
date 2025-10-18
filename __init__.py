@@ -35,6 +35,7 @@ from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
 from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
+from .anymatix_save_audio import AnymatixSaveAudio
 
 NODE_CLASS_MAPPINGS = {
     "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -50,6 +51,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
     "AnymatixImageToVideo": AnymatixImageToVideo,
     "AnymatixSaveAnimatedMP4": AnymatixSaveAnimatedMP4,
+    "AnymatixSaveAudio": AnymatixSaveAudio,
     "AnymatixUNETLoaderGGUF": AnymatixUNETLoaderGGUF,
     "AnymatixLoraLoaderModelOnly": AnymatixLoraLoaderModelOnly,
     "AnymatixDualCLIPLoader": AnymatixDualCLIPLoader,
@@ -74,6 +76,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
     "AnymatixImageToVideo": "Anymatix Image To Video",
     "AnymatixSaveAnimatedMP4": "Anymatix Save Animated MP4",
+    "AnymatixSaveAudio": "Anymatix Save Audio",
     "AnymatixUNETLoaderGGUF": "Anymatix UNET Loader GGUF",
     "AnymatixLoraLoaderModelOnly": "Anymatix Lora Loader Model Only",
     "AnymatixDualCLIPLoader": "Anymatix Dual CLIP Loader",
