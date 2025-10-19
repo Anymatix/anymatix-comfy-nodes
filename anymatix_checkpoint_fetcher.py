@@ -20,7 +20,6 @@ except Exception:
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
-from comfy_extras.nodes_audio_encoder import AudioEncoderLoader
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -163,15 +162,27 @@ class AnymatixQuadrupleCLIPLoader:
         clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2, clip_path3, clip_path4], embedding_directory=folder_paths.get_folder_paths("embeddings"))
         return (clip,)
 
-class AnymatixAudioEncoderLoader(AudioEncoderLoader):
+class AnymatixAudioEncoderLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "audio_encoder_name": ("STRING", ),
                              }}
+    
+    RETURN_TYPES = ("AUDIO_ENCODER",)
+    FUNCTION = "load_model"
     CATEGORY = "Anymatix"
     
     def load_model(self, audio_encoder_name):
-        return super().load_model(os.path.basename(audio_encoder_name))
+        audio_encoder_path = folder_paths.get_full_path_or_raise(
+            "audio_encoders", 
+            os.path.basename(audio_encoder_name)
+        )
+        sd = comfy.utils.load_torch_file(audio_encoder_path, safe_load=True)
+        audio_encoder = comfy.audio_encoders.audio_encoders.load_audio_encoder_from_sd(sd)
+        if audio_encoder is None:
+            raise RuntimeError("ERROR: audio encoder file is invalid")
+        return (audio_encoder,)
+
 class AnymatixUNETLoader(UNETLoader):
     @classmethod
     def INPUT_TYPES(s):
