@@ -223,10 +223,10 @@ class AnymatixSaveAnimatedMP4:
                         out_stream = output_container.add_stream('pcm_s16le', rate=sample_rate, layout=layout)
                         
                         # Convert waveform to numpy array and create audio frame
-                        # PyAV expects shape [channels, samples] -> transpose to [samples, channels]
-                        audio_np = waveform.cpu().float().numpy()
+                        # PyAV expects shape [1, samples * channels] with channels interleaved
+                        # ComfyUI format: [channels, samples] -> move channels to end -> flatten to [1, samples * channels]
                         frame = av.AudioFrame.from_ndarray(
-                            audio_np.T.reshape(1, -1) if num_channels == 1 else audio_np.T,
+                            waveform.movedim(0, 1).reshape(1, -1).float().cpu().numpy(),
                             format='flt',
                             layout=layout
                         )
