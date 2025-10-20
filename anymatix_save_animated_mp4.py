@@ -108,6 +108,9 @@ class AnymatixSaveAnimatedMP4:
                 "fps": ("FLOAT", {"default": 24.0, "min": 0.01, "max": 120.0, "step": 0.01}),
                 "quality": (list(cls.codec_presets.keys()), {"default": "web_compatible"}),
             },
+            "optional": {
+                "audio": ("AUDIO",),
+            }
         }
 
     RETURN_TYPES = ()
@@ -115,9 +118,10 @@ class AnymatixSaveAnimatedMP4:
     OUTPUT_NODE = True
     CATEGORY = "Anymatix"
 
-    def save_images(self, images, output_path, filename_prefix, fps, quality):
+    def save_images(self, images, output_path, filename_prefix, fps, quality, audio=None):
         """
         Save images as MP4 video using FFmpeg for maximum browser compatibility.
+        Optionally muxes audio if provided.
         """
         if not FFMPEG_AVAILABLE:
             print("=" * 70)
@@ -193,12 +197,44 @@ class AnymatixSaveAnimatedMP4:
                             print("Please install: pip install opencv-python pillow")
                             return {"ui": {"images": [], "animated": (True,)}}
                 
+                # Handle audio input if provided
+                audio_file_path = None
+                if audio is not None:
+                    print("Audio provided - will mux with video")
+                    # Save audio to temporary file
+                    audio_file_path = os.path.join(temp_dir, "audio.wav")
+                    # ComfyUI audio format: dict with 'waveform' and 'sample_rate'
+                    # waveform shape: [channels, samples] or [batch, channels, samples]
+                    try:
+                        import torchaudio
+                        waveform = audio['waveform']
+                        sample_rate = audio['sample_rate']
+                        
+                        # Handle batch dimension if present
+                        if len(waveform.shape) == 3:
+                            waveform = waveform[0]  # Take first item from batch
+                        
+                        # Save audio as WAV file
+                        torchaudio.save(audio_file_path, waveform, sample_rate)
+                        print(f"Saved audio: {sample_rate}Hz, shape: {waveform.shape}")
+                    except Exception as e:
+                        print(f"Warning: Could not process audio: {e}")
+                        audio_file_path = None
+                
                 # Build FFmpeg command for maximum browser compatibility
                 ffmpeg_cmd = [
                     FFMPEG_EXE,  # Use the detected FFmpeg executable
                     '-y',  # Overwrite output file
                     '-framerate', str(fps),
                     '-i', frame_pattern,
+                ]
+                
+                # Add audio input if available
+                if audio_file_path is not None:
+                    ffmpeg_cmd.extend(['-i', audio_file_path])
+                
+                # Video encoding options
+                ffmpeg_cmd.extend([
                     '-c:v', preset['codec'],
                     '-profile:v', preset['profile'],
                     '-level', preset['level'],
@@ -206,7 +242,15 @@ class AnymatixSaveAnimatedMP4:
                     '-crf', preset['crf'],
                     '-movflags', '+faststart',  # Enable fast start for web streaming
                     '-tune', 'stillimage'  # Optimize for still image sequences
-                ]
+                ])
+                
+                # Audio encoding options (if audio is present)
+                if audio_file_path is not None:
+                    ffmpeg_cmd.extend([
+                        '-c:a', 'aac',  # AAC audio codec for broad compatibility
+                        '-b:a', '192k',  # Audio bitrate
+                        '-shortest'  # End encoding when shortest input ends (video or audio)
+                    ])
                 
                 # Add GOP structure settings for high quality preset
                 if quality == "high quality":
@@ -270,12 +314,15 @@ class AnymatixSaveAnimatedMP4:
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                     file_size = os.path.getsize(file_path)
                     duration = len(images) / fps
-                    print(f"✓ MP4 created successfully!")
+                    audio_info = " with audio" if audio_file_path is not None else ""
+                    print(f"✓ MP4 created successfully{audio_info}!")
                     print(f"  File: {filename}")
                     print(f"  Size: {file_size:,} bytes")
                     print(f"  Duration: {duration:.2f} seconds")
                     print(f"  Quality: {quality}")
                     print(f"  FFmpeg: {ffmpeg_source}")
+                    if audio_file_path is not None:
+                        print(f"  Audio: muxed")
                     
                     results.append({
                         "filename": filename,
