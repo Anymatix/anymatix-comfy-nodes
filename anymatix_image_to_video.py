@@ -25,24 +25,28 @@ class AnymatixImageToVideo:
                     "max": 1000.0,
                     "step": 0.01
                 }),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "FLOAT")
-    RETURN_NAMES = ("images", "fps")
+    RETURN_TYPES = ("IMAGE", "FLOAT", "AUDIO")
+    RETURN_NAMES = ("images", "fps", "audio")
     FUNCTION = "process"
     CATEGORY = "Anymatix"
 
-    def process(self, images, fps):
+    def process(self, images, fps, audio=None):
         """
-        Process the input images and fps parameter.
+        Process the input images, fps parameter, and optional audio.
         
         Args:
             images: Batch of images (IMAGE tensor)
             fps: Frame rate for video generation (float)
+            audio: Optional audio data to mux with the video (AUDIO tensor)
             
         Returns:
-            tuple: (images, fps) - passes through the inputs for downstream consumption
+            tuple: (images, fps, audio) - passes through the inputs for downstream consumption
         """
         # Validate inputs
         if images is None:
@@ -60,8 +64,9 @@ class AnymatixImageToVideo:
             raise ValueError("Image batch must contain at least 1 image")
             
         # Log processing info
-        print(f"AnymatixImageToVideo: Processing {batch_size} images at {fps} FPS")
+        audio_info = " with audio" if audio is not None else ""
+        print(f"AnymatixImageToVideo: Processing {batch_size} images at {fps} FPS{audio_info}")
         
         # Simply pass through the inputs - the actual video creation will be handled
         # by the SaveAnimatedMP4 node that gets injected by the read function
-        return (images, fps)
+        return (images, fps, audio)
