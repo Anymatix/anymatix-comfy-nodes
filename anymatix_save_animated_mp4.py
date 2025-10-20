@@ -201,12 +201,12 @@ class AnymatixSaveAnimatedMP4:
                 audio_file_path = None
                 if audio is not None:
                     print("Audio provided - will mux with video")
-                    # Save audio to temporary file
+                    # Save audio to temporary file using PyAV (consistent with ComfyUI)
                     audio_file_path = os.path.join(temp_dir, "audio.wav")
                     # ComfyUI audio format: dict with 'waveform' and 'sample_rate'
                     # waveform shape: [channels, samples] or [batch, channels, samples]
                     try:
-                        import torchaudio
+                        import av
                         waveform = audio['waveform']
                         sample_rate = audio['sample_rate']
                         
@@ -214,9 +214,35 @@ class AnymatixSaveAnimatedMP4:
                         if len(waveform.shape) == 3:
                             waveform = waveform[0]  # Take first item from batch
                         
-                        # Save audio as WAV file
-                        torchaudio.save(audio_file_path, waveform, sample_rate)
-                        print(f"Saved audio: {sample_rate}Hz, shape: {waveform.shape}")
+                        # Determine audio layout
+                        num_channels = waveform.shape[0]
+                        layout = 'mono' if num_channels == 1 else 'stereo'
+                        
+                        # Save audio as WAV file using PyAV
+                        output_container = av.open(audio_file_path, mode='w', format='wav')
+                        out_stream = output_container.add_stream('pcm_s16le', rate=sample_rate, layout=layout)
+                        
+                        # Convert waveform to numpy array and create audio frame
+                        # PyAV expects shape [channels, samples] -> transpose to [samples, channels]
+                        audio_np = waveform.cpu().float().numpy()
+                        frame = av.AudioFrame.from_ndarray(
+                            audio_np.T.reshape(1, -1) if num_channels == 1 else audio_np.T,
+                            format='flt',
+                            layout=layout
+                        )
+                        frame.sample_rate = sample_rate
+                        frame.pts = 0
+                        
+                        # Encode and write
+                        for packet in out_stream.encode(frame):
+                            output_container.mux(packet)
+                        
+                        # Flush encoder
+                        for packet in out_stream.encode(None):
+                            output_container.mux(packet)
+                        
+                        output_container.close()
+                        print(f"Saved audio: {sample_rate}Hz, {num_channels} channel(s)")
                     except Exception as e:
                         print(f"Warning: Could not process audio: {e}")
                         audio_file_path = None
