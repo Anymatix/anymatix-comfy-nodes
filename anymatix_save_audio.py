@@ -38,6 +38,11 @@ class AnymatixSaveAudio:
         filename_prefix="audio",
         quality="320k",
     ):
+        # Handle None audio (e.g., from videos without audio tracks)
+        if audio is None or (isinstance(audio, dict) and audio.get("waveform") is None):
+            print(f"anymatix: skipping audio save - no audio data available")
+            return {"ui": {"audio": []}}
+        
         output_path = os.path.join(self.output_dir, output_path)
         os.makedirs(output_path, exist_ok=True)
 
