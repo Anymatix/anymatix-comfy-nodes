@@ -8,6 +8,8 @@ import app.logger
 import folder_paths
 from aiohttp import web
 import os
+import hashlib
+import time
 import socket
 from server import PromptServer
 import app
@@ -151,62 +153,122 @@ async def serve_heartbeat(request):
 
 @routes.post("/anymatix/uploadAsset")
 async def upload_asset(request):
+    """
+    Upload an asset file to the ComfyUI input directory.
+    Uses atomic writes and hash verification to prevent incomplete uploads.
+    Supports resumable uploads for large files.
+    """
     reader = await request.multipart()
 
     hash_value = None
     file_extension = None
+    temp_path = None
+    resume_offset = 0
 
-    # Iterate over the parts in the multipart form
-    async for part in reader:
-        if part.name == "hash":  # Retrieve the 'hash' field
-            hash_value = await part.text()
-        elif part.name == "extension":  # Retrieve the 'extension' field
-            file_extension = await part.text()
-        elif part.name == "file":  # Handle the file upload
-            file_path = os.path.join(
-                folder_paths.input_directory, f"{hash_value}.{file_extension}"
+    try:
+        # Iterate over the parts in the multipart form
+        async for part in reader:
+            if part.name == "hash":
+                hash_value = await part.text()
+            elif part.name == "extension":
+                file_extension = await part.text()
+            elif part.name == "resume":
+                # Client requests to resume from previous upload
+                resume_requested = await part.text()
+                resume_offset = int(resume_requested) if resume_requested.isdigit() else 0
+            elif part.name == "file":
+                if not hash_value or not file_extension:
+                    return web.Response(status=400, text="Hash and extension must be provided before file")
+                
+                # Final destination path
+                file_path = os.path.join(
+                    folder_paths.input_directory, f"{hash_value}.{file_extension}"
+                )
+                
+                # Write to temporary file first (atomic write pattern)
+                # Use same .tmp convention as downloads (fetch.py uses .segment_N for parallel, .tmp for temp)
+                temp_path = f"{file_path}.tmp"
+                
+                # Check if partial upload exists (resumable upload)
+                existing_size = 0
+                if resume_offset > 0 and os.path.exists(temp_path):
+                    existing_size = os.path.getsize(temp_path)
+                    if existing_size == resume_offset:
+                        print(f"anymatix: resuming upload of {hash_value}.{file_extension} from {existing_size} bytes")
+                    else:
+                        # Size mismatch, start over
+                        print(f"anymatix: resume offset mismatch (expected {resume_offset}, found {existing_size}), restarting upload")
+                        existing_size = 0
+                        resume_offset = 0
+                
+                try:
+                    # Open in append mode if resuming, otherwise write mode
+                    mode = "ab" if existing_size > 0 and resume_offset > 0 else "wb"
+                    with open(temp_path, mode) as output_file:
+                        bytes_written = 0
+                        while chunk := await part.read_chunk():
+                            output_file.write(chunk)
+                            bytes_written += len(chunk)
+                    
+                    total_written = existing_size + bytes_written
+                    print(f"anymatix: uploaded {bytes_written} bytes ({total_written} total) for {hash_value}.{file_extension}")
+                    
+                except Exception as write_error:
+                    # Don't delete temp file on write error - allows resume
+                    print(f"anymatix: upload write error (temp file preserved for resume): {write_error}")
+                    current_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                    return web.Response(
+                        status=500, 
+                        text=f"Upload write failed: {str(write_error)}",
+                        headers={"X-Resume-Offset": str(current_size)}
+                    )
+                
+                # Verify the uploaded file hash matches expected hash
+                try:
+                    computed_hash = hashlib.sha256()
+                    with open(temp_path, 'rb') as f:
+                        for chunk in iter(lambda: f.read(8192), b''):
+                            computed_hash.update(chunk)
+                    
+                    if computed_hash.hexdigest() != hash_value:
+                        # Hash mismatch - delete temp file
+                        os.remove(temp_path)
+                        print(f"anymatix: upload hash mismatch - expected {hash_value}, got {computed_hash.hexdigest()}")
+                        return web.Response(status=400, text="Hash verification failed - file corrupted during upload")
+                except Exception as hash_error:
+                    # Don't delete temp file on hash error - might be partial upload
+                    print(f"anymatix: upload hash verification error: {hash_error}")
+                    current_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                    return web.Response(
+                        status=500, 
+                        text=f"Hash verification failed: {str(hash_error)}",
+                        headers={"X-Resume-Offset": str(current_size)}
+                    )
+                
+                # Atomic rename - if this succeeds, the file is complete and verified
+                try:
+                    os.rename(temp_path, file_path)
+                    print(f"anymatix: successfully uploaded and verified {hash_value}.{file_extension} ({total_written} bytes)")
+                except Exception as rename_error:
+                    # Don't delete temp file - can retry rename
+                    print(f"anymatix: upload rename error (temp file preserved): {rename_error}")
+                    return web.Response(status=500, text=f"Failed to finalize upload: {str(rename_error)}")
+        
+        if not hash_value or not file_extension:
+            return web.Response(status=400, text="Missing required fields: hash, extension, and file")
+        
+        return web.Response(status=200, text="Upload successful")
+    
+    except Exception as e:
+        # Don't clean up temp file on unexpected error - allows resume/retry
+        print(f"anymatix: upload error (temp file preserved for resume): {e}")
+        if temp_path and os.path.exists(temp_path):
+            current_size = os.path.getsize(temp_path)
+            return web.Response(
+                status=500, 
+                text=f"Upload failed: {str(e)}",
+                headers={"X-Resume-Offset": str(current_size)}
             )
-            with open(file_path, "wb") as output_file:
-                while chunk := await part.read_chunk():  # Read file in chunks
-                    output_file.write(chunk)
-    # TODO: choose a temporary file name first, then check file hash, then rename
-
-    # This is done from the client in js:
-    # const formData = new FormData()
-    # formData.append('file', file)
-    # formData.append('hash', h)
-    # file = data.get('file')
-
-    # if not file:
-    #     return web.Response(status=400, text="File is required")
-
-    # extension = data.get('extension')
-    # if not extension:
-    #     return web.Response(status=400, text="extension is required")
-
-    # import hashlib
-
-    # # Compute the SHA256 hash of the file
-    # file_hash = hashlib.sha256()
-    # while True:
-    #     chunk = file.read(8192)
-    #     if not chunk:
-    #         break
-    #     file_hash.update(chunk)
-    # hash_value = file_hash.hexdigest()
-
-    # file_path = os.path.join(
-    #     folder_paths.input_directory, f"{hash_value}.{extension}")
-
-    # with open(file_path, 'wb') as f:
-    #     file.seek(0)
-    #     while True:
-    #         chunk = file.read(8192)
-    #         if not chunk:
-    #             break
-    #         f.write(chunk)
-
-    return web.Response(status=200)
 
 
 outdir = f"{folder_paths.output_directory}/anymatix/results"
@@ -362,6 +424,24 @@ async def serve_expunge(request):
         input_assets, computation_results, outdir, folder_paths.input_directory
     )
 
+    # Clean up temporary upload files (.tmp) in input directory
+    # These are incomplete uploads that should be removed during cache cleanup
+    temp_files_deleted = []
+    try:
+        for tmp_file in Path(folder_paths.input_directory).glob("*.tmp"):
+            try:
+                # Check if file is old (more than 24 hours)
+                # Recent .tmp files might be active uploads
+                if time.time() - tmp_file.stat().st_mtime > 86400:  # 24 hours
+                    tmp_file.unlink()
+                    temp_files_deleted.append(str(tmp_file.name))
+            except Exception as e:
+                print(f"anymatix: failed to delete temp upload file {tmp_file}: {e}")
+        if temp_files_deleted:
+            print(f"anymatix: cleaned up {len(temp_files_deleted)} old temporary upload files")
+    except Exception as e:
+        print(f"anymatix: error during temp file cleanup: {e}")
+
     # If delete parameter is present, delete those hashes from results and input directories
     from .expunge import hash_pattern, input_asset_pattern
     deleted = []
@@ -383,6 +463,14 @@ async def serve_expunge(request):
                     deleted.append(str(f))
                 except Exception as e:
                     print(f"Failed to delete input asset {f}: {e}")
+        # Also delete any associated .tmp file for this hash
+        tmp_file = Path(folder_paths.input_directory) / f"{h}.*.tmp"
+        for tmp in Path(folder_paths.input_directory).glob(f"{h}.*.tmp"):
+            try:
+                tmp.unlink()
+                deleted.append(str(tmp))
+            except Exception as e:
+                print(f"Failed to delete temp file {tmp}: {e}")
     if deleted:
         print(f"anymatix: deleted hashes: {deleted}")
     return web.Response(status=200)
