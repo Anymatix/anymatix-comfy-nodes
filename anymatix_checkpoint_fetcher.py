@@ -603,20 +603,38 @@ class AnymatixSAM2Loader:
 
     def load_model(self, sam2_name, segmentor, device, precision):
         import torch
+        import importlib.util
+        import sys
 
         sam2_nodes_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "ComfyUI-segment-anything-2")
         )
-        if os.path.exists(sam2_nodes_path) and sam2_nodes_path not in sys.path:
-            sys.path.insert(0, sam2_nodes_path)
-
-        try:
-            from load_model import load_model as sam2_load_model
-        except ImportError:
+        
+        if not os.path.exists(sam2_nodes_path):
             raise Exception(
                 "ComfyUI-segment-anything-2 not found. "
                 "Please install it from https://github.com/kijai/ComfyUI-segment-anything-2"
             )
+
+        # Import load_model as a module to support its relative imports
+        load_model_path = os.path.join(sam2_nodes_path, "load_model.py")
+        spec = importlib.util.spec_from_file_location("ComfyUI_segment_anything_2.load_model", load_model_path)
+        if spec is None or spec.loader is None:
+            raise Exception(f"Could not load load_model.py from {load_model_path}")
+        
+        load_model_module = importlib.util.module_from_spec(spec)
+        sys.modules["ComfyUI_segment_anything_2.load_model"] = load_model_module
+        sys.modules["ComfyUI_segment_anything_2"] = type(sys)("ComfyUI_segment_anything_2")
+        sys.modules["ComfyUI_segment_anything_2"].__path__ = [sam2_nodes_path]
+        
+        try:
+            spec.loader.exec_module(load_model_module)
+            sam2_load_model = load_model_module.load_model
+        except Exception as e:
+            raise Exception(
+                f"Failed to import load_model from ComfyUI-segment-anything-2: {e}"
+            )
+
 
         if precision != 'fp32' and device == 'cpu':
             raise ValueError("fp16 and bf16 are not supported on cpu")
