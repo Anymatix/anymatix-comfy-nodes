@@ -662,7 +662,7 @@ class AnymatixSAM2Loader:
                 f"Make sure AnymatixFetcher has downloaded it first."
             )
 
-        script_directory = os.path.dirname(sam2_nodes_path)
+        # Config files are in ComfyUI-segment-anything-2/sam2_configs/
         model_mapping = {
             "2.0": {
                 "base": "sam2_hiera_b+.yaml",
@@ -680,7 +680,7 @@ class AnymatixSAM2Loader:
 
         version = "2.1" if "2.1" in model_path else "2.0"
         model_cfg_path = next(
-            (os.path.join(script_directory, "sam2_configs", cfg)
+            (os.path.join(sam2_nodes_path, "sam2_configs", cfg)
              for key, cfg in model_mapping[version].items() if key in model_path),
             None
         )
