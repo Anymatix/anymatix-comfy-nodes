@@ -141,6 +141,7 @@ async def serve_heartbeat(request):
         data = await request.json()
         timeout = data.get("timeout", 60)  # Default 60s if not specified
         _heartbeat_timeout_seconds = timeout
+        print(f"anymatix: heartbeat received, timeout={timeout}s")
         
         # Reset the watchdog timer: cancel previous timer task and create a new one
         async with _heartbeat_lock:
