@@ -13,6 +13,17 @@ except ImportError:
                     parent.rmdir()
             except:
                 pass
+
+# Import ComfyUI's interrupt checking if available
+try:
+    import comfy.model_management
+    def check_interrupted():
+        comfy.model_management.throw_exception_if_processing_interrupted()
+except ImportError:
+    # Fallback for standalone execution
+    def check_interrupted():
+        pass
+
 import hashlib
 import json
 import os
@@ -132,10 +143,15 @@ def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size:
         with session.get(url, headers=req_headers, allow_redirects=True, stream=True) as response_2:
             response_2.raise_for_status()
             for item in response_2.iter_content(chunk_size):
+                # Check for ComfyUI interrupt signal before processing each chunk
+                check_interrupted()
                 callback(item)
     except requests.RequestException as e:
         raise Exception(f"HTTP request failed during traditional download: {e}") from e
     except Exception as e:
+        # Re-raise InterruptProcessingException as-is for proper handling
+        if "InterruptProcessingException" in type(e).__name__ or "InterruptProcessingException" in str(type(e)):
+            raise
         raise Exception(f"Unexpected error during traditional download: {e}") from e
 
 
@@ -201,6 +217,8 @@ class SegmentDownloader:
                         
                     segment_data = b''
                     for chunk in response.iter_content(chunk_size=8192):
+                        # Check for ComfyUI interrupt signal
+                        check_interrupted()
                         if chunk:
                             segment_data += chunk
                             chunk_size = len(chunk)
@@ -231,6 +249,9 @@ class SegmentDownloader:
                     return True
                     
             except Exception as e:
+                # Re-raise InterruptProcessingException for proper handling
+                if "InterruptProcessingException" in type(e).__name__:
+                    raise
                 if attempt < max_retries - 1:
                     wait_time = backoff_base * (2 ** attempt)
                     time.sleep(wait_time)
