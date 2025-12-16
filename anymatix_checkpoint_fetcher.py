@@ -10,16 +10,34 @@ import comfy.utils
 import folder_paths
 try:
     # When loaded as a package inside ComfyUI, use relative import
-    from .fetch import download_file
+    from .fetch import download_file, hash_string
 except Exception:
     # When running this file directly for testing, fall back to absolute import
     try:
-        from fetch import download_file
+        from fetch import download_file, hash_string
     except Exception:
         # Provide a helpful error when import truly fails
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
+
+
+def verify_model_file_exists(file_path: str, model_type: str = "model") -> None:
+    """
+    Verify that a model file exists before attempting to load it.
+    Raises FileNotFoundError with a helpful message if the file is missing.
+    
+    Args:
+        file_path: Full path to the model file
+        model_type: Type of model for error message (e.g., "lora", "checkpoint", "upscale")
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"{model_type.capitalize()} file not found: {file_path}\n"
+            f"The model may have been deleted or moved. "
+            f"Please ensure the model is downloaded and try again."
+        )
+
 
 gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
@@ -234,6 +252,7 @@ class AnymatixUpscaleModelLoader:
     def load_model(self, model_name):
         print("loading upscale model", model_name)
         model_path = model_name
+        verify_model_file_exists(model_path, "upscale model")
         sd = comfy.utils.load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
             sd = comfy.utils.state_dict_prefix_replace(sd, {"module.": ""})
@@ -268,6 +287,7 @@ class AnymatixCheckpointLoader:
     def load_checkpoint(self, ckpt_name):
         print("loading checkpoint", ckpt_name)
         ckpt_path = ckpt_name
+        verify_model_file_exists(ckpt_path, "checkpoint")
         out = comfy.sd.load_checkpoint_guess_config(
             ckpt_path,
             output_vae=True,
@@ -339,6 +359,7 @@ class AnymatixLoraLoader:
                 self.loaded_lora = None
 
         if lora is None:
+            verify_model_file_exists(lora_path, "lora")
             lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
             self.loaded_lora = (lora_path, lora)
 
@@ -577,6 +598,55 @@ class AnymatixFetcher:
                 # Include URL in user message for better debugging
                 user_msg_with_url = f"{user_msg}\nURL: {base_url}"
                 raise Exception(user_msg_with_url) from e
+
+    @classmethod
+    def IS_CHANGED(cls, url):
+        """
+        Check if the model file exists. If not, return NaN to force re-download.
+        This prevents ComfyUI from using cached output paths when the actual model
+        file has been deleted.
+        """
+        if url["type"] not in dirmap:
+            return float("NaN")
+        
+        base_url = url.get("url")
+        auth = url.get("auth")
+        if auth is not None and len(auth) > 0:
+            p = urlparse(base_url)
+            existing = parse_qsl(p.query, keep_blank_values=True)
+            to_add = parse_qsl(auth, keep_blank_values=True)
+            new_query = urlencode(existing + to_add)
+            effective = urlunparse(p._replace(query=new_query))
+        else:
+            effective = base_url
+        
+        url_hash = hash_string(effective)
+        dir_path = os.path.join(folder_paths.models_dir, dirmap[url["type"]])
+        json_path = os.path.join(dir_path, f"{url_hash}.json")
+        
+        # If JSON doesn't exist, file needs to be downloaded
+        if not os.path.exists(json_path):
+            return float("NaN")
+        
+        # Read JSON to get expected file name
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            file_name = data.get("file_name")
+            if not file_name:
+                return float("NaN")
+            file_path = os.path.join(dir_path, file_name)
+            
+            # If model file doesn't exist, force re-download
+            if not os.path.exists(file_path):
+                print(f"[ANYMATIX IS_CHANGED] Model file missing, forcing re-download: {file_path}")
+                return float("NaN")
+            
+            # File exists, return hash for stable caching
+            return url_hash
+        except Exception as e:
+            print(f"[ANYMATIX IS_CHANGED] Error checking model file: {e}")
+            return float("NaN")
 
 
 # Attribution: Based on DownloadAndLoadSAM2Model from

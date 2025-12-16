@@ -890,6 +890,22 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 else:
                     raise Exception(f"Both parallel and traditional download methods failed for {data['file_name']}")
 
+        # Final verification: ensure file exists and has correct size before returning
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(
+                f"Download completed but file not found: {file_path}. "
+                f"This may indicate a download failure, filesystem issue, or the file was deleted during download."
+            )
+        
+        if data["file_size"] is not None:
+            actual_size = os.path.getsize(file_path)
+            if actual_size != data["file_size"]:
+                raise Exception(
+                    f"Downloaded file size mismatch for {data['file_name']}: "
+                    f"expected {data['file_size']} bytes, got {actual_size} bytes. "
+                    f"The download may have been interrupted or corrupted."
+                )
+
         print("Model name:", data["file_name"])
 
         return file_path
