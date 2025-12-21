@@ -97,7 +97,6 @@ class AnymatixVAELoader(VAELoader):
     CATEGORY = "Anymatix"
     
     def load_vae(self, vae_name):
-        self.vae_list()
         return super().load_vae(os.path.basename(vae_name))
 
 class AnymatixCLIPLoader(CLIPLoader):
