@@ -7,6 +7,9 @@ imageio-ffmpeg>=0.4.7    # Automatic FFmpeg management (downloads FFmpeg automat
 numpy>=1.19.0           # Required for image processing
 av>=16.0.1             # PyAV for audio/video processing (used by audio muxing) - pinned to fix NAL parsing
 
+# Added for ControlNet Aux and other nodes that require it
+scikit-image
+
 # Optional but recommended
 opencv-python>=4.5.0    # For faster image processing (fallback to PIL if not available)
 Pillow>=8.0.0          # Image processing fallback if OpenCV not available
