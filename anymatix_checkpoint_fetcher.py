@@ -102,13 +102,9 @@ class AnymatixVAELoader(VAELoader):
 class AnymatixCLIPLoader(CLIPLoader):
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "clip_name": ("STRING", ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image"], ),
-                              },
-                "optional": {
-                              "device": (["default", "cpu"], {"advanced": True}),
-    
-                             }}
+        types = super().INPUT_TYPES()
+        types["required"]["clip_name"] = ("STRING", )
+        return types
 
     CATEGORY = "Anymatix"    
 
@@ -119,14 +115,10 @@ AnymatixCLIPLoader2=AnymatixCLIPLoader
 class AnymatixDualCLIPLoader(DualCLIPLoader):
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "clip_name1": ("STRING", ),
-                              "clip_name2": ("STRING", ),
-                              "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream"], ),
-                            },
-                "optional": {
-                    "device": (["default", "cpu"], {"advanced": True}),
-                            }
-                }
+        types = super().INPUT_TYPES()
+        types["required"]["clip_name1"] = ("STRING", )
+        types["required"]["clip_name2"] = ("STRING", )
+        return types
 
     CATEGORY = "Anymatix"
 
