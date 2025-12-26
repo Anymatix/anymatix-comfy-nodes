@@ -399,23 +399,6 @@ class AnymatixCheckpointFetcher:
                 progress = new_progress
                 pbar.update_absolute(progress, 1000)
 
-        def expand_info_civitai(url):
-            # get the model id from the url using a regex that matches the first /.../ after https://civitai.com/api/download/models
-            pattern = r"https://civitai\.com/api/download/models/([^/]+)"
-            match = re.search(pattern, url)
-            if match:
-                model_id = match.group(1)
-            else:
-                return None
-            model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
-            with requests.Session() as session:
-                return requests.get(model_info_url, allow_redirects=True).json()
-
-        def expand_info(url):
-            if url.startswith("https://civitai.com/api/download/models"):
-                return expand_info_civitai(url)
-            return None
-
         # Build base/effective URLs. Prefer explicit auth arg; else, preserve legacy token-in-URL behavior.
         try:
             p = urlparse(url)
@@ -481,6 +464,28 @@ dirmap = {
 }
 
 
+def expand_info_civitai(url):
+    # get the model id from the url using a regex that matches the first /.../ after https://civitai.com/api/download/models
+    pattern = r"https://civitai\.com/api/download/models/([^/]+)"
+    match = re.search(pattern, url)
+    if match:
+        model_id = match.group(1)
+    else:
+        return None
+    model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
+    try:
+        with requests.Session() as session:
+            return requests.get(model_info_url, allow_redirects=True).json()
+    except Exception:
+        return None
+
+
+def expand_info(url):
+    if url.startswith("https://civitai.com/api/download/models"):
+        return expand_info_civitai(url)
+    return None
+
+
 class AnymatixFetcher:
     @classmethod
     def INPUT_TYPES(cls):
@@ -509,34 +514,49 @@ class AnymatixFetcher:
             progress = 0
             pbar.update_absolute(progress, 1000)
 
-            def callback(x, y):
-                import math
-
-                new_progress = round(1000 * x / y)
-                nonlocal progress
-                if new_progress != progress:
-                    progress = new_progress
-                    pbar.update_absolute(progress, 1000)
-
-            def expand_info_civitai(url):
-                # get the model id from the url using a regex that matches the first /.../ after https://civitai.com/api/download/models
-                pattern = r"https://civitai\.com/api/download/models/([^/]+)"
-                match = re.search(pattern, url)
-                if match:
-                    model_id = match.group(1)
-                else:
-                    return None
-                model_info_url = f"https://civitai.com/api/v1/model-versions/{model_id}"
-                with requests.Session() as session:
-                    return requests.get(model_info_url, allow_redirects=True).json()
-
-            def expand_info(url):
-                if url.startswith("https://civitai.com/api/download/models"):
-                    return expand_info_civitai(url)
-                return None
-
             base_url = url.get("url")
             auth = url.get("auth")
+
+            # PRE-DOWNLOAD DEDUPLICATION CHECK
+            info = expand_info(base_url)
+            if info and "files" in info:
+                # Find the file that matches the download request (usually first or specific name)
+                # Civitai provides SHA256 hashes in the files list
+                target_hash = None
+                for f in info["files"]:
+                    if "hashes" in f and "SHA256" in f["hashes"]:
+                        target_hash = f["hashes"]["SHA256"].lower()
+                        break
+                
+                if target_hash:
+                    # Check if we already have a sidecar with this hash
+                    print(f"[ANYMATIX] Pre-checking hash for deduplication: {target_hash}")
+                    for item in os.listdir(dir):
+                        if item.endswith(".json"):
+                            try:
+                                with open(os.path.join(dir, item), 'r') as sidecar_f:
+                                    sidecar_data = json.load(sidecar_f)
+                                if sidecar_data.get("sha256") == target_hash:
+                                    other_file_name = sidecar_data.get("file_name")
+                                    if other_file_name:
+                                        other_file_path = os.path.join(dir, other_file_name)
+                                        if os.path.exists(other_file_path):
+                                            print(f"[ANYMATIX] Model with hash {target_hash} already exists at {other_file_path}. Skipping download.")
+                                            # Create sidecar for the current URL
+                                            url_hash = hash_string(base_url) # Simple base_url hash for sidecar name
+                                            new_sidecar_path = os.path.join(dir, f"{url_hash}.json")
+                                            new_data = {
+                                                "url": base_url,
+                                                "file_name": other_file_name,
+                                                "sha256": target_hash,
+                                                "data": info
+                                            }
+                                            with open(new_sidecar_path, 'w') as f:
+                                                json.dump(new_data, f, indent=4)
+                                            return (other_file_path,)
+                            except Exception:
+                                pass
+
             if auth is not None and len(auth) > 0:
                 # Robustly append query parameters using urllib
                 p = urlparse(base_url)

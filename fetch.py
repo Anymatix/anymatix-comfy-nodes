@@ -83,6 +83,15 @@ def hash_string(input_string):
     return hash_object.hexdigest()
 
 
+def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Compute SHA256 hash of a file efficiently."""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(chunk_size), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
 def redact_url(u: str, appended: Optional[str] = None) -> str:
     """Return a safe-to-log URL string.
     Remove only the query parameters contained in 'appended' (if any), preserving all other params.
@@ -712,13 +721,32 @@ def delete_files(url, dir):
                     if model_file:
                         file_path = os.path.join(root, model_file)
                         if os.path.exists(file_path):
-                            try:
-                                delete_file_and_cleanup_dir(Path(file_path), dir)
+                            # REFERENCE-AWARE DELETION
+                            # Check if any OTHER sidecar references this file
+                            referenced = False
+                            for other_f in os.listdir(root):
+                                if other_f.endswith('.json') and other_f != f:
+                                    try:
+                                        with open(os.path.join(root, other_f), 'r') as other_contents:
+                                            other_data = json.load(other_contents)
+                                        if other_data.get("file_name") == model_file:
+                                            referenced = True
+                                            break
+                                    except:
+                                        pass
+                            
+                            if not referenced:
+                                try:
+                                    delete_file_and_cleanup_dir(Path(file_path), dir)
+                                    with open(log_path, "a") as log:
+                                        log.write(f"Deleted model file: {file_path}\n")
+                                except Exception as e:
+                                    with open(error_path, "a") as err:
+                                        err.write(f"Failed to delete model file: {file_path} - {e}\n")
+                            else:
                                 with open(log_path, "a") as log:
-                                    log.write(f"Deleted model file by base-url match: {file_path}\n")
-                            except Exception as e:
-                                with open(error_path, "a") as err:
-                                    err.write(f"Failed to delete model file: {file_path} - {e}\n")
+                                    log.write(f"Skipping model file deletion (still referenced): {file_path}\n")
+                            
                             deleted_dirs.add(os.path.dirname(file_path))
                     # Delete the json sidecar
                     try:
@@ -793,7 +821,42 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             with open(store_path, 'w') as file:
                 json.dump(data, file, indent=4)
 
+        # EARLY DEDUPLICATION CHECK (using metadata hash if available)
+        metadata_hash = None
+        if "data" in data and isinstance(data["data"], dict):
+            # Check for hashes in Civitai-style metadata
+            if "hashes" in data["data"] and isinstance(data["data"]["hashes"], dict):
+                metadata_hash = data["data"]["hashes"].get("SHA256", "").lower()
+            elif "files" in data["data"] and isinstance(data["data"]["files"], list):
+                # Civitai often has a list of files
+                for f in data["data"]["files"]:
+                    if "hashes" in f and isinstance(f["hashes"], dict):
+                        metadata_hash = f["hashes"].get("SHA256", "").lower()
+                        if metadata_hash: break
+
         file_path = os.path.join(dir, data["file_name"])
+
+        if metadata_hash:
+            data["sha256"] = metadata_hash # Pre-set it
+            print(f"[ANYMATIX] Early hash check for {data['file_name']}: {metadata_hash}")
+            for item in os.listdir(dir):
+                if item.endswith(".json") and item != f"{url_hash}.json":
+                    try:
+                        with open(os.path.join(dir, item), 'r') as f:
+                            other_data = json.load(f)
+                        if other_data.get("sha256") == metadata_hash:
+                            other_file_name = other_data.get("file_name")
+                            if other_file_name:
+                                other_file_path = os.path.join(dir, other_file_name)
+                                if os.path.exists(other_file_path):
+                                    print(f"[ANYMATIX] Found existing model with matching hash: {other_file_path}. Using it.")
+                                    # Update current sidecar to point to the EXISTING file
+                                    data["file_name"] = other_file_name
+                                    with open(store_path, 'w') as file:
+                                        json.dump(data, file, indent=4)
+                                    return other_file_path
+                    except Exception as e:
+                        print(f"[WARNING] Early deduplication check failed for {item}: {e}")
         local_file_size = 0
 
         if data["file_size"] is not None and os.path.exists(file_path):
@@ -906,9 +969,33 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     f"The download may have been interrupted or corrupted."
                 )
 
+        # POST-DOWNLOAD DEDUPLICATION
+        print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
+        sha256 = compute_file_sha256(file_path).lower()
+        data["sha256"] = sha256
+        
+        # Determine canonical filename: original_sha256.ext
+        f_parts = data["file_name"].rsplit("_", 1)[0].rsplit(".", 1) # Strip the url_hash part
+        ext = ("." + f_parts[1]) if len(f_parts) > 1 else ""
+        canonical_name = f"{f_parts[0]}_{sha256}{ext}"
+        canonical_path = os.path.join(dir, canonical_name)
+
+        if os.path.exists(canonical_path) and canonical_path != file_path:
+            print(f"[ANYMATIX] Deduplicated model found: {canonical_path}. Reusing.")
+            os.remove(file_path)
+            data["file_name"] = canonical_name
+        else:
+            print(f"[ANYMATIX] New unique model. Naming: {canonical_name}")
+            os.rename(file_path, canonical_path)
+            data["file_name"] = canonical_name
+        
+        # Save sidecar with canonical filename and hash
+        with open(store_path, 'w') as file:
+            json.dump(data, file, indent=4)
+
         print("Model name:", data["file_name"])
 
-        return file_path
+        return os.path.join(dir, data["file_name"])
 
 
 def expand_info_civitai(url):
