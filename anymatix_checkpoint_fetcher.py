@@ -557,6 +557,15 @@ class AnymatixFetcher:
                             except Exception:
                                 pass
 
+            def callback(x, y):
+                import math
+
+                new_progress = round(1000 * x / y)
+                nonlocal progress
+                if new_progress != progress:
+                    progress = new_progress
+                    pbar.update_absolute(progress, 1000)
+
             if auth is not None and len(auth) > 0:
                 # Robustly append query parameters using urllib
                 p = urlparse(base_url)
