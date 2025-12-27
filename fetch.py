@@ -805,10 +805,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             if data["file_name"] is None:
                 data["file_name"] = f"{file_name_default}"
             f = data["file_name"]
-            x = f.rsplit(".")
-            data["name"] = x[0]
+            data["name"] = f # Keep full original filename
+            x = f.rsplit(".", 1)
             data["file_name"] = f"{x[0]}_{url_hash}" + \
-                ('.' + '.'.join(x[1:]) if len(x) > 1 else "")
+                ('.' + x[1] if len(x) > 1 else "")
             if expand_info:
                 try:
                     info = expand_info(url)
@@ -975,9 +975,19 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         data["sha256"] = sha256
         
         # Determine canonical filename: original_sha256.ext
-        f_parts = data["file_name"].rsplit("_", 1)[0].rsplit(".", 1) # Strip the url_hash part
-        ext = ("." + f_parts[1]) if len(f_parts) > 1 else ""
-        canonical_name = f"{f_parts[0]}_{sha256}{ext}"
+        name_with_hash = data["file_name"]
+        parts = name_with_hash.rsplit("_", 1)
+        if len(parts) > 1:
+            basename = parts[0]
+            suffix = parts[1]
+            ext_parts = suffix.split(".", 1)
+            ext = ("." + ext_parts[1]) if len(ext_parts) > 1 else ""
+        else:
+            basename_parts = name_with_hash.rsplit(".", 1)
+            basename = basename_parts[0]
+            ext = ("." + basename_parts[1]) if len(basename_parts) > 1 else ""
+        
+        canonical_name = f"{basename}_{sha256}{ext}"
         canonical_path = os.path.join(dir, canonical_name)
 
         if os.path.exists(canonical_path) and canonical_path != file_path:
