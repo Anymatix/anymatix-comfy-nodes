@@ -176,7 +176,12 @@ class AnymatixSaveAnimatedMP4:
                 # Save frames as individual images
                 frame_pattern = os.path.join(temp_dir, "frame_%06d.png")
                 
-                print(f"Preparing {len(images)} frames...")
+                # Add progress bar for frame preparation
+                import comfy.utils
+                total_frames = len(images)
+                pbar = comfy.utils.ProgressBar(total_frames)
+                print(f"Preparing {total_frames} frames...")
+                
                 for i, image in enumerate(images):
                     # Convert from torch tensor to numpy array
                     img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
@@ -196,6 +201,9 @@ class AnymatixSaveAnimatedMP4:
                             print("Error: Neither OpenCV nor PIL is available for image processing")
                             print("Please install: pip install opencv-python pillow")
                             return {"ui": {"images": [], "animated": (True,)}}
+                    
+                    # Update progress bar after each frame
+                    pbar.update(1)
                 
                 # Handle audio input if provided
                 audio_file_path = None

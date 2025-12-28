@@ -109,7 +109,13 @@ class Anymatix_Image_Save:
 
         saved_files = list()
         results = list()
-        for image in images:
+        
+        # Add progress bar for batch image saving
+        total_images = len(images)
+        pbar = comfy.utils.ProgressBar(total_images) if total_images > 1 else None
+        print(f"anymatix: saving {total_images} images to {output_path}")
+        
+        for idx, image in enumerate(images):
             i = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
@@ -155,6 +161,10 @@ class Anymatix_Image_Save:
 
             if overwrite_mode != "prefix_as_filename":
                 counter += 1
+            
+            # Update progress bar after each image save
+            if pbar is not None:
+                pbar.update(1)
 
         if save_json:
             json_output_file = os.path.abspath(
