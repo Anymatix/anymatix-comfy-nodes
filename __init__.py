@@ -39,6 +39,7 @@ from .anymatix_image_to_video import AnymatixImageToVideo
 from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
 from .anymatix_save_audio import AnymatixSaveAudio
 from .anymatix_save_json import AnymatixSaveJson
+from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 
 NODE_CLASS_MAPPINGS = {
     "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -64,6 +65,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixAudioEncoderLoader": AnymatixAudioEncoderLoader,
     "AnymatixSAM2Loader": AnymatixSAM2Loader,
     "AnymatixSaveJson": AnymatixSaveJson,
+    "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -90,6 +92,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixAudioEncoderLoader": "Anymatix Audio Encoder Loader",
     "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
     "AnymatixSaveJson": "Anymatix Save Json",
+    "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
 }
 
 
