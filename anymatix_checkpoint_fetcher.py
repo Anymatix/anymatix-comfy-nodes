@@ -73,7 +73,22 @@ gguf_nodes.__package__ = pkg_name
 sys.modules[nodes_mod_name] = gguf_nodes
 spec.loader.exec_module(gguf_nodes)
 
-CHECKPOINTS_DIR = os.path.join(folder_paths.models_dir, "checkpoints")
+def get_anymatix_models_dir(type_name: str) -> str:
+    """
+    Get the primary directory for a model type, respecting extra_model_paths.yaml.
+    """
+    try:
+        # folder_paths.get_folder_paths return a list of paths
+        # The first path is the primary (default) one if is_default: true was used in YAML
+        paths = folder_paths.get_folder_paths(type_name)
+        if paths:
+            return paths[0]
+    except Exception:
+        pass
+    # Fallback to internal ComfyUI models directory
+    return os.path.join(folder_paths.models_dir, type_name)
+
+CHECKPOINTS_DIR = get_anymatix_models_dir("checkpoints")
 
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
@@ -509,7 +524,7 @@ class AnymatixFetcher:
         except Exception:
             pass
         if url["type"] in dirmap:
-            dir = os.path.join(folder_paths.models_dir, dirmap[url["type"]])
+            dir = get_anymatix_models_dir(dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
             progress = 0
             pbar.update_absolute(progress, 1000)
@@ -606,7 +621,7 @@ class AnymatixFetcher:
                 elif "429" in error_str or "rate limit" in error_str.lower():
                     user_msg = f"Failed to download {model_type} model: Too many requests. Please wait a moment and try again."
                 elif "Errno 28" in error_str or "No space left on device" in error_str:
-                    storage_path = folder_paths.models_dir
+                    storage_path = dir
                     user_msg = f"Failed to download {model_type} model: No space left on device.\n[ANYMATIX_STORAGE_FULL:{storage_path}]"
                 else:
                     user_msg = f"Failed to download {model_type} model: {e}"
@@ -641,7 +656,7 @@ class AnymatixFetcher:
             effective = base_url
         
         url_hash = hash_string(effective)
-        dir_path = os.path.join(folder_paths.models_dir, dirmap[url["type"]])
+        dir_path = get_anymatix_models_dir(dirmap[url["type"]])
         json_path = os.path.join(dir_path, f"{url_hash}.json")
         
         # If JSON doesn't exist, file needs to be downloaded
@@ -743,7 +758,7 @@ class AnymatixSAM2Loader:
             base_name, extension = model_path.rsplit('.', 1)
             model_path = f"{base_name}-fp16.{extension}"
 
-        sam2_models_dir = os.path.join(folder_paths.models_dir, "sam2")
+        sam2_models_dir = get_anymatix_models_dir("sam2")
         full_model_path = os.path.join(sam2_models_dir, model_path)
 
         if not os.path.exists(full_model_path):
