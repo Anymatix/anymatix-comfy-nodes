@@ -117,14 +117,15 @@ class AnymatixSaveAnimatedMP4:
 
     def save_video(self, video, output_path, filename_prefix, quality):
         """
-        Save VIDEO object as MP4 using FFmpeg for maximum browser compatibility.
-        Extracts images, fps, and audio from the VIDEO's components.
+        Save VIDEO object as MP4 using FFmpeg pipe input for efficient on-the-fly encoding.
+        No temporary files - frames are piped directly to FFmpeg stdin as raw RGB data.
         """
         # Extract components from VIDEO object
         components = video.get_components()
         images = components.images
         fps = float(components.frame_rate)
         audio = components.audio
+        
         if not FFMPEG_AVAILABLE:
             print("=" * 70)
             print("ERROR: FFmpeg is not available!")
@@ -147,13 +148,13 @@ class AnymatixSaveAnimatedMP4:
             
         preset = self.codec_presets.get(quality, self.codec_presets["web_compatible"])
         
-        # Create output directory
-        output_path = os.path.join(folder_paths.get_output_directory(), output_path)
-        os.makedirs(output_path, exist_ok=True)
+        # Create output directory (output_path is the hash subdirectory)
+        full_output_path = os.path.join(folder_paths.get_output_directory(), output_path)
+        os.makedirs(full_output_path, exist_ok=True)
         
         ffmpeg_source = "imageio-ffmpeg" if IMAGEIO_FFMPEG_AVAILABLE else "system"
-        print(f"Anymatix: Encoding MP4 with FFmpeg ({ffmpeg_source}, quality: {quality})")
-        print(f"Output path: {output_path}")
+        print(f"Anymatix: Encoding MP4 with FFmpeg pipe ({ffmpeg_source}, quality: {quality})")
+        print(f"Output path: {full_output_path}")
         
         results = []
         
@@ -168,214 +169,164 @@ class AnymatixSaveAnimatedMP4:
         else:
             filename = filename_prefix
         
-        file_path = os.path.join(output_path, filename)
+        file_path = os.path.join(full_output_path, filename)
         
-        print(f"Creating video: {filename} ({len(images)} frames at {fps} fps)")
+        # Get frame dimensions from first image
+        height, width = images[0].shape[:2]
+        total_frames = len(images)
         
-        # Create temporary directory for frame images
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                # Save frames as individual images
-                frame_pattern = os.path.join(temp_dir, "frame_%06d.png")
-                
-                # Add progress bar for frame preparation
-                import comfy.utils
-                total_frames = len(images)
-                pbar = comfy.utils.ProgressBar(total_frames)
-                print(f"Preparing {total_frames} frames...")
-                
-                for i, image in enumerate(images):
-                    # Convert from torch tensor to numpy array
-                    img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
+        print(f"Creating video: {filename} ({total_frames} frames at {fps} fps, {width}x{height})")
+        
+        try:
+            # Handle audio - need temp file for audio only (can't pipe two streams)
+            audio_file_path = None
+            temp_dir = None
+            
+            if audio is not None:
+                print("Audio provided - will mux with video")
+                temp_dir = tempfile.mkdtemp()
+                audio_file_path = os.path.join(temp_dir, "audio.wav")
+                try:
+                    import av
+                    waveform = audio['waveform']
+                    sample_rate = audio['sample_rate']
                     
-                    if CV2_AVAILABLE:
-                        # Use OpenCV for image saving (faster)
-                        frame_path = os.path.join(temp_dir, f"frame_{i:06d}.png")
-                        cv2.imwrite(frame_path, cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
-                    else:
-                        # Fallback to PIL
-                        try:
-                            from PIL import Image as PILImage
-                            frame_path = os.path.join(temp_dir, f"frame_{i:06d}.png")
-                            pil_image = PILImage.fromarray(img_np)
-                            pil_image.save(frame_path)
-                        except ImportError:
-                            print("Error: Neither OpenCV nor PIL is available for image processing")
-                            print("Please install: pip install opencv-python pillow")
-                            return {"ui": {"images": [], "animated": (True,)}}
+                    if len(waveform.shape) == 3:
+                        waveform = waveform[0]
                     
-                    # Update progress bar after each frame
-                    pbar.update(1)
-                
-                # Handle audio input if provided
-                audio_file_path = None
-                if audio is not None:
-                    print("Audio provided - will mux with video")
-                    # Save audio to temporary file using PyAV (consistent with ComfyUI)
-                    audio_file_path = os.path.join(temp_dir, "audio.wav")
-                    # ComfyUI audio format: dict with 'waveform' and 'sample_rate'
-                    # waveform shape: [channels, samples] or [batch, channels, samples]
-                    try:
-                        import av
-                        waveform = audio['waveform']
-                        sample_rate = audio['sample_rate']
-                        
-                        # Handle batch dimension if present
-                        if len(waveform.shape) == 3:
-                            waveform = waveform[0]  # Take first item from batch
-                        
-                        # Determine audio layout
-                        num_channels = waveform.shape[0]
-                        layout = 'mono' if num_channels == 1 else 'stereo'
-                        
-                        # Save audio as WAV file using PyAV
-                        output_container = av.open(audio_file_path, mode='w', format='wav')
-                        out_stream = output_container.add_stream('pcm_s16le', rate=sample_rate, layout=layout)
-                        
-                        # Convert waveform to numpy array and create audio frame
-                        # PyAV expects shape [1, samples * channels] with channels interleaved
-                        # ComfyUI format: [channels, samples] -> move channels to end -> flatten to [1, samples * channels]
-                        frame = av.AudioFrame.from_ndarray(
-                            waveform.movedim(0, 1).reshape(1, -1).float().cpu().numpy(),
-                            format='flt',
-                            layout=layout
-                        )
-                        frame.sample_rate = sample_rate
-                        frame.pts = 0
-                        
-                        # Encode and write
-                        for packet in out_stream.encode(frame):
-                            output_container.mux(packet)
-                        
-                        # Flush encoder
-                        for packet in out_stream.encode(None):
-                            output_container.mux(packet)
-                        
-                        output_container.close()
-                        print(f"Saved audio: {sample_rate}Hz, {num_channels} channel(s)")
-                    except Exception as e:
-                        print(f"Warning: Could not process audio: {e}")
-                        audio_file_path = None
-                
-                # Build FFmpeg command for maximum browser compatibility
-                ffmpeg_cmd = [
-                    FFMPEG_EXE,  # Use the detected FFmpeg executable
-                    '-y',  # Overwrite output file
-                    '-framerate', str(fps),
-                    '-i', frame_pattern,
-                ]
-                
-                # Add audio input if available
-                if audio_file_path is not None:
-                    ffmpeg_cmd.extend(['-i', audio_file_path])
-                
-                # Video encoding options
+                    num_channels = waveform.shape[0]
+                    layout = 'mono' if num_channels == 1 else 'stereo'
+                    
+                    output_container = av.open(audio_file_path, mode='w', format='wav')
+                    out_stream = output_container.add_stream('pcm_s16le', rate=sample_rate, layout=layout)
+                    
+                    frame = av.AudioFrame.from_ndarray(
+                        waveform.movedim(0, 1).reshape(1, -1).float().cpu().numpy(),
+                        format='flt',
+                        layout=layout
+                    )
+                    frame.sample_rate = sample_rate
+                    frame.pts = 0
+                    
+                    for packet in out_stream.encode(frame):
+                        output_container.mux(packet)
+                    for packet in out_stream.encode(None):
+                        output_container.mux(packet)
+                    
+                    output_container.close()
+                    print(f"Prepared audio: {sample_rate}Hz, {num_channels} channel(s)")
+                except Exception as e:
+                    print(f"Warning: Could not process audio: {e}")
+                    audio_file_path = None
+            
+            # Build FFmpeg command with pipe input (rawvideo)
+            ffmpeg_cmd = [
+                FFMPEG_EXE,
+                '-y',
+                '-f', 'rawvideo',
+                '-vcodec', 'rawvideo',
+                '-s', f'{width}x{height}',
+                '-pix_fmt', 'rgb24',
+                '-r', str(fps),
+                '-i', '-',  # Read from stdin
+            ]
+            
+            # Add audio input if available
+            if audio_file_path is not None:
+                ffmpeg_cmd.extend(['-i', audio_file_path])
+            
+            # Video encoding options
+            ffmpeg_cmd.extend([
+                '-c:v', preset['codec'],
+                '-profile:v', preset['profile'],
+                '-level', preset['level'],
+                '-pix_fmt', preset['pix_fmt'],
+                '-crf', preset['crf'],
+                '-movflags', '+faststart',
+            ])
+            
+            # Audio encoding options
+            if audio_file_path is not None:
                 ffmpeg_cmd.extend([
-                    '-c:v', preset['codec'],
-                    '-profile:v', preset['profile'],
-                    '-level', preset['level'],
-                    '-pix_fmt', preset['pix_fmt'],
-                    '-crf', preset['crf'],
-                    '-movflags', '+faststart',  # Enable fast start for web streaming
-                    '-tune', 'stillimage'  # Optimize for still image sequences
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-shortest'
                 ])
-                
-                # Audio encoding options (if audio is present)
-                if audio_file_path is not None:
-                    ffmpeg_cmd.extend([
-                        '-c:a', 'aac',  # AAC audio codec for broad compatibility
-                        '-b:a', '192k',  # Audio bitrate
-                        '-shortest'  # End encoding when shortest input ends (video or audio)
-                    ])
-                
-                # Add GOP structure settings for high quality preset
-                if quality == "high quality":
-                    ffmpeg_cmd.extend([
-                        '-g', preset['g'],  # GOP size
-                        '-keyint_min', preset['min_keyint'],  # Minimum keyframe interval
-                        '-sc_threshold', preset['sc_threshold'],  # Scene change threshold
-                        '-force_key_frames', f'expr:gte(t,n_forced*{1.0/fps})'  # Force keyframes at regular intervals
-                    ])
-                
-                # Add preset if specified
-                if 'preset' in preset:
-                    ffmpeg_cmd.extend(['-preset', preset['preset']])
-                
-                # Generate metadata file for high quality preset
-                metadata_path = None
-                if quality == "high quality":
-                    metadata_path = file_path.replace('.mp4', '_metadata.json')
-                    gop_size = int(preset['g'])
-                    total_frames = len(images)
-                    keyframe_positions = list(range(0, total_frames, gop_size))
-                    
-                    import json
-                    metadata = {
-                        "gop_size": gop_size,
-                        "fps": fps,
-                        "total_frames": total_frames,
-                        "keyframe_positions": keyframe_positions,
-                        "duration": total_frames / fps,
-                        "encoding": {
-                            "codec": preset['codec'],
-                            "profile": preset['profile'],
-                            "crf": preset['crf']
-                        }
-                    }
-                    
-                    with open(metadata_path, 'w') as f:
-                        json.dump(metadata, f, indent=2)
-                    print(f"Generated metadata file: {os.path.basename(metadata_path)}")
-                
-                # Add output file
-                ffmpeg_cmd.append(file_path)
-                
-                print("Running FFmpeg with browser-optimized settings...")
-                print(f"Using: {FFMPEG_EXE}")
-                
-                # Run FFmpeg
-                result = subprocess.run(
-                    ffmpeg_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minute timeout
-                )
-                
-                if result.returncode != 0:
-                    print("FFmpeg encoding failed!")
-                    print(f"Error output: {result.stderr}")
-                    return {"ui": {"images": [], "animated": (True,)}}
-                
-                # Verify the output file exists and has content
-                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                    file_size = os.path.getsize(file_path)
-                    duration = len(images) / fps
-                    audio_info = " with audio" if audio_file_path is not None else ""
-                    print(f"✓ MP4 created successfully{audio_info}!")
-                    print(f"  File: {filename}")
-                    print(f"  Size: {file_size:,} bytes")
-                    print(f"  Duration: {duration:.2f} seconds")
-                    print(f"  Quality: {quality}")
-                    print(f"  FFmpeg: {ffmpeg_source}")
-                    if audio_file_path is not None:
-                        print(f"  Audio: muxed")
-                    
-                    results.append({
-                        "filename": filename,
-                        "subfolder": output_path.replace(folder_paths.get_output_directory(), "").strip(os.sep),
-                        "type": self.type
-                    })
-                else:
-                    print(f"Error: Output file {file_path} was not created or is empty")
-                    return {"ui": {"images": [], "animated": (True,)}}
-                
-            except subprocess.TimeoutExpired:
-                print("Error: FFmpeg encoding timed out (>5 minutes)")
-                print("This might happen with very long videos or slow systems.")
+            
+            # GOP settings for high quality
+            if quality == "high quality":
+                ffmpeg_cmd.extend([
+                    '-g', preset['g'],
+                    '-keyint_min', preset['min_keyint'],
+                    '-sc_threshold', preset['sc_threshold'],
+                ])
+            
+            if 'preset' in preset:
+                ffmpeg_cmd.extend(['-preset', preset['preset']])
+            
+            ffmpeg_cmd.append(file_path)
+            
+            print(f"Starting FFmpeg pipe encoding...")
+            
+            # Start FFmpeg process with pipe
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Stream frames directly to FFmpeg - no temp files!
+            import comfy.utils
+            pbar = comfy.utils.ProgressBar(total_frames)
+            
+            for i, image in enumerate(images):
+                # Convert to uint8 RGB and get raw bytes
+                img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
+                # Write raw RGB bytes directly to FFmpeg stdin
+                process.stdin.write(img_np.tobytes())
+                pbar.update(1)
+            
+            # Close stdin and wait for FFmpeg to finish
+            process.stdin.close()
+            stdout, stderr = process.communicate(timeout=300)
+            
+            # Cleanup temp audio file
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            if process.returncode != 0:
+                print("FFmpeg encoding failed!")
+                print(f"Error: {stderr.decode()}")
                 return {"ui": {"images": [], "animated": (True,)}}
-            except Exception as e:
-                print(f"Error during FFmpeg encoding: {str(e)}")
+            
+            # Verify output
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                file_size = os.path.getsize(file_path)
+                duration = total_frames / fps
+                audio_info = " with audio" if audio_file_path is not None else ""
+                print(f"MP4 created successfully{audio_info}!")
+                print(f"  File: {filename}")
+                print(f"  Size: {file_size:,} bytes")
+                print(f"  Duration: {duration:.2f} seconds")
+                print(f"  Quality: {quality}")
+                
+                results.append({
+                    "filename": filename,
+                    "subfolder": output_path,
+                    "type": self.type
+                })
+            else:
+                print(f"Error: Output file {file_path} was not created or is empty")
                 return {"ui": {"images": [], "animated": (True,)}}
+                
+        except subprocess.TimeoutExpired:
+            process.kill()
+            print("Error: FFmpeg encoding timed out (>5 minutes)")
+            return {"ui": {"images": [], "animated": (True,)}}
+        except Exception as e:
+            print(f"Error during FFmpeg encoding: {str(e)}")
+            return {"ui": {"images": [], "animated": (True,)}}
         
         return {"ui": {"images": results, "animated": (True,)}}
 
