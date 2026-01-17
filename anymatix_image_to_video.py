@@ -1,14 +1,14 @@
-import torch
+from fractions import Fraction
+from comfy_api.latest import InputImpl, Types
 
 
 class AnymatixImageToVideo:
     """
     A custom node that combines image batches with FPS parameters for video generation.
     This node takes an IMAGE input (batch of images) and a fps parameter,
-    then outputs both values in a format that can be consumed by video save nodes.
+    then outputs a VIDEO object compatible with ComfyUI's video abstraction.
     
-    Since observer nodes injected by the 'read' function can't take parameters directly,
-    this node serves as a bridge between image generation and video saving functionality.
+    The VIDEO output can be consumed by AnymatixSaveAnimatedMP4 or GetVideoComponents.
     """
     
     def __init__(self):
@@ -31,8 +31,8 @@ class AnymatixImageToVideo:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "FLOAT", "AUDIO")
-    RETURN_NAMES = ("images", "fps", "audio")
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
     FUNCTION = "process"
     CATEGORY = "Anymatix"
 
@@ -46,7 +46,7 @@ class AnymatixImageToVideo:
             audio: Optional audio data to mux with the video (AUDIO tensor)
             
         Returns:
-            tuple: (images, fps, audio) - passes through the inputs for downstream consumption
+            tuple: (VIDEO,) - a VideoFromComponents object wrapping the inputs
         """
         # Validate inputs
         if images is None:
@@ -67,6 +67,9 @@ class AnymatixImageToVideo:
         audio_info = " with audio" if audio is not None else ""
         print(f"AnymatixImageToVideo: Processing {batch_size} images at {fps} FPS{audio_info}")
         
-        # Simply pass through the inputs - the actual video creation will be handled
-        # by the SaveAnimatedMP4 node that gets injected by the read function
-        return (images, fps, audio)
+        # Create a VIDEO object using ComfyUI's VideoFromComponents abstraction
+        # This is zero-cost - just wraps references without copying data
+        video = InputImpl.VideoFromComponents(
+            Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps))
+        )
+        return (video,)

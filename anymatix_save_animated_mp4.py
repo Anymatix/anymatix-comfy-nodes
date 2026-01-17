@@ -53,7 +53,8 @@ FFMPEG_AVAILABLE, FFMPEG_EXE = check_ffmpeg()
 class AnymatixSaveAnimatedMP4:
     """
     Custom SaveAnimatedMP4 node that uses FFmpeg for maximum browser compatibility.
-    Saves image sequences as MP4 video files using FFmpeg with H.264 baseline profile.
+    Saves VIDEO objects as MP4 video files using FFmpeg with H.264 baseline profile.
+    Accepts ComfyUI VIDEO input (from AnymatixImageToVideo, LoadVideo, CreateVideo, etc.)
     """
     
     def __init__(self):
@@ -102,27 +103,28 @@ class AnymatixSaveAnimatedMP4:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "video": ("VIDEO",),
                 "output_path": ("STRING", {"default": "anymatix/results", "multiline": False}),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
-                "fps": ("FLOAT", {"default": 24.0, "min": 0.01, "max": 120.0, "step": 0.01}),
                 "quality": (list(cls.codec_presets.keys()), {"default": "web_compatible"}),
             },
-            "optional": {
-                "audio": ("AUDIO",),
-            }
         }
 
     RETURN_TYPES = ()
-    FUNCTION = "save_images"
+    FUNCTION = "save_video"
     OUTPUT_NODE = True
     CATEGORY = "Anymatix"
 
-    def save_images(self, images, output_path, filename_prefix, fps, quality, audio=None):
+    def save_video(self, video, output_path, filename_prefix, quality):
         """
-        Save images as MP4 video using FFmpeg for maximum browser compatibility.
-        Optionally muxes audio if provided.
+        Save VIDEO object as MP4 using FFmpeg for maximum browser compatibility.
+        Extracts images, fps, and audio from the VIDEO's components.
         """
+        # Extract components from VIDEO object
+        components = video.get_components()
+        images = components.images
+        fps = float(components.frame_rate)
+        audio = components.audio
         if not FFMPEG_AVAILABLE:
             print("=" * 70)
             print("ERROR: FFmpeg is not available!")
