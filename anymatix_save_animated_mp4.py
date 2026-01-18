@@ -300,8 +300,13 @@ class AnymatixSaveAnimatedMP4:
                 print(f"Error: {stderr.decode()}")
                 return {"ui": {"images": [], "animated": (True,)}}
             
-            # Verify output
+            # Verify output and ensure file is fully synced to disk
+            # Without fsync, the UI may try to fetch the file before it's fully written
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                # Force sync to disk so file is available immediately
+                with open(file_path, 'r+b') as f:
+                    os.fsync(f.fileno())
+                
                 file_size = os.path.getsize(file_path)
                 duration = total_frames / fps
                 audio_info = " with audio" if audio_file_path is not None else ""
