@@ -107,13 +107,28 @@ class Anymatix_Image_Save:
             )
             file_extension = "png"
 
-        saved_files = list()
         results = list()
         
-        # Add progress bar for batch image saving
+        # Total image count is deterministic - write JSON FIRST so viewer can display immediately
         total_images = len(images)
+        
+        if save_json == "true":
+            # Write JSON with final count BEFORE saving images
+            # This allows the viewer to know the count immediately and show images as they arrive
+            json_output_file = os.path.abspath(
+                os.path.join(output_path, f"{filename_prefix}.json")
+            )
+            json_obj = {"count": total_images}
+            with open(json_output_file, "w") as outfile:
+                json.dump(json_obj, outfile)
+            print(f"anymatix: JSON written first with count={total_images}")
+        
+        # Add progress bar for batch image saving
         pbar = comfy.utils.ProgressBar(total_images) if total_images > 1 else None
-        print(f"anymatix: saving {total_images} images to {output_path}")
+        # For batches, disable PNG optimization (compress_level=1 is ~32x faster than optimize=True)
+        # optimize=True uses compress_level=9 which is very slow for many images
+        fast_batch = total_images > 4
+        print(f"anymatix: saving {total_images} images to {output_path} (fast_batch={fast_batch})")
         
         for idx, image in enumerate(images):
             i = 255.0 * image.cpu().numpy()
@@ -134,23 +149,23 @@ class Anymatix_Image_Save:
             try:
                 output_file = os.path.abspath(os.path.join(output_path, file))
 
-                if save_json:
-                    saved_files.append(file)
-
                 if extension in ["jpg", "jpeg"]:
-                    img.save(output_file, quality=quality, optimize=True)
+                    img.save(output_file, quality=quality, optimize=not fast_batch)
                 elif extension == "webp":
                     img.save(output_file, quality=quality, lossless=lossless_webp)
                 elif extension == "png":
-                    img.save(output_file, optimize=True)
+                    # compress_level: 0=none, 1=fast, 6=default, 9=max (slowest)
+                    # For batches, use level 1 (~32x faster than level 9/optimize)
+                    img.save(output_file, compress_level=1 if fast_batch else 6)
                 elif extension == "bmp":
                     img.save(output_file)
                 elif extension == "tiff":
-                    img.save(output_file, quality=quality, optimize=True)
+                    img.save(output_file, quality=quality, optimize=not fast_batch)
                 else:
-                    img.save(output_file, optimize=True)
+                    img.save(output_file, optimize=not fast_batch)
 
-                print(f"Image file saved to: {output_file}")
+                if not fast_batch:
+                    print(f"Image file saved to: {output_file}")
 
             except OSError as e:
                 print(f"Unable to save file to: {output_file}")
@@ -166,13 +181,7 @@ class Anymatix_Image_Save:
             if pbar is not None:
                 pbar.update(1)
 
-        if save_json:
-            json_output_file = os.path.abspath(
-                os.path.join(output_path, f"{filename_prefix}.json")
-            )
-            json_obj = {"count": len(saved_files)}
-            with open(json_output_file, "w") as outfile:
-                json.dump(json_obj, outfile)
+        # JSON was already written at the start with the correct count
 
         filtered_paths = []
         if filtered_paths:
