@@ -22,6 +22,10 @@ except Exception:
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
 
+# Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
+import importlib.util
+import types
+
 def verify_model_file_exists(file_path: str, model_type: str = "model") -> None:
     """
     Verify that a model file exists before attempting to load it.
@@ -43,39 +47,40 @@ gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
 )
 
-seedvr2_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interfaces", "dit_model_loader.py")
+seedvr2_root = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "ComfyUI-SeedVR2_VideoUpscaler",
+        "src"
+    )
 )
+
+interface_pkg_name = "SeedVR2.interface"
+interface_path = os.path.join(seedvr2_root, "interface")
+
+if interface_pkg_name not in sys.modules:
+    interface_pkg = types.ModuleType(interface_pkg_name)
+    interface_pkg.__path__ = [interface_path]
+    sys.modules[interface_pkg_name] = interface_pkg
+
+dit_loader_path = os.path.join(interface_path, "dit_model_loader.py")
+
+module_name = "SeedVR2.interface.dit_model_loader"
+spec = importlib.util.spec_from_file_location(module_name, dit_loader_path)
+
+seedvr2_module = importlib.util.module_from_spec(spec)
+seedvr2_module.__package__ = "SeedVR2.interface"
+
+sys.modules[module_name] = seedvr2_module
+spec.loader.exec_module(seedvr2_module)
+
+SeedVR2LoadDiTModel = seedvr2_module.SeedVR2LoadDiTModel
 
 import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if custom_nodes_path not in sys.path:
     sys.path.insert(0, custom_nodes_path)
-
-# Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
-import importlib.util
-import types
-
-
-spec = importlib.util.spec_from_file_location(
-    "SeedVR2.dit_model_loader",
-    seedvr2_path
-)
-
-seedvr2_module = importlib.util.module_from_spec(spec)
-sys.modules["SeedVR2.dit_model_loader"] = seedvr2_module
-
-pkg_name = "SeedVR2"
-pkg_path = os.path.dirname(os.path.dirname(seedvr2_path))
-
-if pkg_name not in sys.modules:
-    pkg = types.ModuleType(pkg_name)
-    pkg.__path__ = [pkg_path]
-    sys.modules[pkg_name] = pkg
-
-spec.loader.exec_module(seedvr2_module)
-
-SeedVR2LoadDiTModel = seedvr2_module.SeedVR2LoadDiTModel
 
 # Load the sibling ComfyUI-GGUF package as a proper package so that its
 # relative imports (e.g. `from .ops import ...`) work when we load the
