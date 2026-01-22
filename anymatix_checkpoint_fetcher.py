@@ -44,7 +44,7 @@ gguf_nodes_path = os.path.abspath(
 )
 
 seedvr2_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interface", "dit_model_loader.py")
+    os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interfaces", "dit_model_loader.py")
 )
 
 import sys
