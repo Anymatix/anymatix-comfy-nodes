@@ -56,8 +56,26 @@ if custom_nodes_path not in sys.path:
 import importlib.util
 import types
 
-#load SeedVR2 module
-import SeedVR2LoadDiTModel
+
+spec = importlib.util.spec_from_file_location(
+    "SeedVR2.dit_model_loader",
+    seedvr2_path
+)
+
+seedvr2_module = importlib.util.module_from_spec(spec)
+sys.modules["SeedVR2.dit_model_loader"] = seedvr2_module
+
+pkg_name = "SeedVR2"
+pkg_path = os.path.dirname(os.path.dirname(seedvr2_path))
+
+if pkg_name not in sys.modules:
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [pkg_path]
+    sys.modules[pkg_name] = pkg
+
+spec.loader.exec_module(seedvr2_module)
+
+SeedVR2LoadDiTModel = seedvr2_module.SeedVR2LoadDiTModel
 
 # Load the sibling ComfyUI-GGUF package as a proper package so that its
 # relative imports (e.g. `from .ops import ...`) work when we load the
