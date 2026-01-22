@@ -8,7 +8,7 @@ import comfy
 import comfy.sd
 import comfy.utils
 import folder_paths
-#from comfy_api.latest import io
+from comfy_api.latest import io
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import download_file, hash_string
@@ -43,9 +43,9 @@ gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
 )
 
-# seedvr2_path = os.path.abspath(
-#     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interface", "dit_model_loader.py")
-# )
+seedvr2_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interface", "dit_model_loader.py")
+)
 
 import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -57,7 +57,7 @@ import importlib.util
 import types
 
 #load SeedVR2 module
-# import SeedVR2LoadDiTModel
+import SeedVR2LoadDiTModel
 
 # Load the sibling ComfyUI-GGUF package as a proper package so that its
 # relative imports (e.g. `from .ops import ...`) work when we load the
@@ -101,28 +101,110 @@ CHECKPOINTS_DIR = get_anymatix_models_dir("checkpoints")
 if not os.path.exists(CHECKPOINTS_DIR):
     os.makedirs(CHECKPOINTS_DIR)
 
-# class AnymatixSeedVR2DiTLoader(SeedVR2LoadDiTModel):
-#     @classmethod
-#     def define_schema(cls) -> io.Schema:
-#         return io.Schema(
-#             node_id="SeedVR2LoadDiTModel",
-#             display_name="SeedVR2 (Down)Load DiT Model",
-#             category="SEEDVR2",
-#             description=(
-#                 "Load and configure SeedVR2 DiT (Diffusion Transformer) model for video upscaling. "
-#                 "Supports BlockSwap memory optimization for low VRAM systems, model caching for batch processing, "
-#                 "multi-GPU offloading, and torch.compile acceleration. \n\n"
-#                 "Connect to Video Upscaler node."
-#             ),
-#             inputs=[],
-#             outputs=[
-#                 io.Custom("SEEDVR2_DIT").Output(
-#                     tooltip="DiT model configuration containing model path, device settings, BlockSwap parameters, and compilation options. Connect to Video Upscaler node."
-#                 )
-#             ]
-#         )
+class AnymatixSeedVR2DiTLoader(SeedVR2LoadDiTModel):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="AnymatixSeedVR2LoadDiTModel",
+            display_name="SeedVR2 (Down)Load DiT Model",
+            category="SEEDVR2",
+            description=(
+                "Load and configure SeedVR2 DiT (Diffusion Transformer) model for video upscaling. "
+                "Supports BlockSwap memory optimization for low VRAM systems, model caching for batch processing, "
+                "multi-GPU offloading, and torch.compile acceleration. \n\n"
+                "Connect to Video Upscaler node."
+            ),
+            inputs=[
+                io.String.Input("model",
+                    default=DEFAULT_DIT,
+                    tooltip=(
+                        "DiT (Diffusion Transformer) model for video upscaling.\n"
+                        "Models automatically download on first use.\n"
+                        "Additional models can be added to the ComfyUI models folder."
+                    )
+                ),
+                io.String.Input("device",
+                    default=devices[0],
+                    tooltip="GPU device for DiT model inference (upscaling phase)"
+                ),
+                io.Int.Input("blocks_to_swap",
+                    default=0,
+                    min=0,
+                    max=36,
+                    step=1,
+                    optional=True,
+                    tooltip=(
+                        "Number of transformer blocks to swap between devices for VRAM optimization.\n"
+                        "• 0: Disabled (default)\n"
+                        "• 3B model: 0-32 blocks\n"
+                        "• 7B model: 0-36 blocks\n"
+                        "\n"
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
+                    )
+                ),
+                io.Boolean.Input("swap_io_components",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Offload input/output embeddings and normalization layers to reduce VRAM.\n"
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
+                    )
+                ),
+                io.String.Input("offload_device",
+                    default="none",
+                    optional=True,
+                    tooltip=(
+                        "Device to offload DiT model when not actively processing.\n"
+                        "• 'none': Keep model on inference device (default, fastest)\n"
+                        "• 'cpu': Offload to system RAM (reduces VRAM usage)\n"
+                        "• 'cuda:X': Offload to another GPU (good balance if available)\n"
+                        "\n"
+                        "Required for BlockSwap (blocks_to_swap or swap_io_components)."
+                    )
+                ),
+                io.Boolean.Input("cache_model",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Keep DiT model loaded on offload_device between workflow runs.\n"
+                        "Useful for batch processing to avoid repeated loading.\n"
+                        "Requires offload_device to be set."
+                    )
+                ),
+                io.String.Input("attention_mode",
+                    default="sdpa",
+                    optional=True,
+                    tooltip=(
+                        "Attention computation backend:\n"
+                        "• sdpa: PyTorch scaled_dot_product_attention (default, stable, always available)\n"
+                        "• flash_attn_2: Flash Attention 2 (Ampere+, requires flash-attn package)\n"
+                        "• flash_attn_3: Flash Attention 3 (Hopper+, requires flash-attn with FA3 support)\n"
+                        "• sageattn_2: SageAttention 2 (requires sageattention package)\n"
+                        "• sageattn_3: SageAttention 3 (Blackwell/RTX 50xx only, requires sageattn3 package)\n"
+                        "\n"
+                        "SDPA is recommended - stable and works everywhere.\n"
+                        "Flash Attention and SageAttention provide speedup through optimized CUDA kernels on compatible GPUs."
+                    )
+                ),
+                io.Custom("TORCH_COMPILE_ARGS").Input("torch_compile_args",
+                    optional=True,
+                    tooltip=(
+                        "Optional torch.compile optimization settings from SeedVR2 Torch Compile Settings node.\n"
+                        "Provides 20-40% speedup with compatible PyTorch 2.0+ and Triton installation."
+                    )
+                ),
+            ],
+            outputs=[
+                io.Custom("SEEDVR2_DIT").Output(
+                    tooltip="DiT model configuration containing model path, device settings, BlockSwap parameters, and compilation options. Connect to Video Upscaler node."
+                )
+            ]
+        )
     
-#     CATEGORY = "Anymatix"
+    CATEGORY = "Anymatix"
+
 
 class AnymatixCLIPVisionLoader(CLIPVisionLoader):
     @classmethod
