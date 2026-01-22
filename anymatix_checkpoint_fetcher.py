@@ -57,8 +57,8 @@ seedvr2_root = os.path.abspath(
     )
 )
 
-interface_pkg_name = "SeedVR2.interface"
-interface_path = os.path.join(seedvr2_root, "interface")
+interface_pkg_name = "SeedVR2.interfaces"
+interface_path = os.path.join(seedvr2_root, "interfaces")
 
 if interface_pkg_name not in sys.modules:
     interface_pkg = types.ModuleType(interface_pkg_name)
@@ -67,11 +67,11 @@ if interface_pkg_name not in sys.modules:
 
 dit_loader_path = os.path.join(interface_path, "dit_model_loader.py")
 
-module_name = "SeedVR2.interface.dit_model_loader"
+module_name = "SeedVR2.interfaces.dit_model_loader"
 spec = importlib.util.spec_from_file_location(module_name, dit_loader_path)
 
 seedvr2_module = importlib.util.module_from_spec(spec)
-seedvr2_module.__package__ = "SeedVR2.interface"
+seedvr2_module.__package__ = "SeedVR2.interfaces"
 
 sys.modules[module_name] = seedvr2_module
 spec.loader.exec_module(seedvr2_module)
