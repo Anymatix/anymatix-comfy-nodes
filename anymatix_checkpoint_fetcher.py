@@ -8,6 +8,7 @@ import comfy
 import comfy.sd
 import comfy.utils
 import folder_paths
+#from comfy_api.latest import io
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import download_file, hash_string
@@ -20,7 +21,6 @@ except Exception:
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
-
 
 def verify_model_file_exists(file_path: str, model_type: str = "model") -> None:
     """
@@ -43,6 +43,10 @@ gguf_nodes_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-GGUF", "nodes.py")
 )
 
+# seedvr2_path = os.path.abspath(
+#     os.path.join(os.path.dirname(__file__), "..", "ComfyUI-SeedVR2_VideoUpscaler", "src", "interface", "dit_model_loader.py")
+# )
+
 import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if custom_nodes_path not in sys.path:
@@ -51,6 +55,9 @@ if custom_nodes_path not in sys.path:
 # Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
 import importlib.util
 import types
+
+#load SeedVR2 module
+# import SeedVR2LoadDiTModel
 
 # Load the sibling ComfyUI-GGUF package as a proper package so that its
 # relative imports (e.g. `from .ops import ...`) work when we load the
@@ -93,6 +100,29 @@ CHECKPOINTS_DIR = get_anymatix_models_dir("checkpoints")
 # Ensure checkpoints directory exists
 if not os.path.exists(CHECKPOINTS_DIR):
     os.makedirs(CHECKPOINTS_DIR)
+
+# class AnymatixSeedVR2DiTLoader(SeedVR2LoadDiTModel):
+#     @classmethod
+#     def define_schema(cls) -> io.Schema:
+#         return io.Schema(
+#             node_id="SeedVR2LoadDiTModel",
+#             display_name="SeedVR2 (Down)Load DiT Model",
+#             category="SEEDVR2",
+#             description=(
+#                 "Load and configure SeedVR2 DiT (Diffusion Transformer) model for video upscaling. "
+#                 "Supports BlockSwap memory optimization for low VRAM systems, model caching for batch processing, "
+#                 "multi-GPU offloading, and torch.compile acceleration. \n\n"
+#                 "Connect to Video Upscaler node."
+#             ),
+#             inputs=[],
+#             outputs=[
+#                 io.Custom("SEEDVR2_DIT").Output(
+#                     tooltip="DiT model configuration containing model path, device settings, BlockSwap parameters, and compilation options. Connect to Video Upscaler node."
+#                 )
+#             ]
+#         )
+    
+#     CATEGORY = "Anymatix"
 
 class AnymatixCLIPVisionLoader(CLIPVisionLoader):
     @classmethod
@@ -476,6 +506,7 @@ dirmap = {
     "clip_vision": "clip_vision",
     "audio_encoder": "audio_encoders",
     "sam2": "sam2",
+    "SEEDVR2": "SEEDVR2",
 }
 
 
