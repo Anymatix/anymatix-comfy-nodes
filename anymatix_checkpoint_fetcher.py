@@ -506,7 +506,7 @@ dirmap = {
     "clip_vision": "clip_vision",
     "audio_encoder": "audio_encoders",
     "sam2": "sam2",
-    "SEEDVR2": "SEEDVR2",
+    "SEEDVR2_model": "SEEDVR2",
 }
 
 
