@@ -9,6 +9,7 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 from comfy_api.latest import io
+import sys
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import download_file, hash_string
@@ -77,7 +78,6 @@ spec.loader.exec_module(seedvr2_module)
 
 SeedVR2LoadDiTModel = seedvr2_module.SeedVR2LoadDiTModel
 
-import sys
 custom_nodes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if custom_nodes_path not in sys.path:
     sys.path.insert(0, custom_nodes_path)
