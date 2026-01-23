@@ -90,7 +90,7 @@ class AnymatixSeedVR2LoadDiTModel():
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("SEEDVR2_model", {}),
+                "model": ("STRING", {"default": "seedvr2_ema_3b_fp8_e4m3fn.safetensors"}),
                 "device": ("STRING", {"default": "cuda:0"}),
                 "offload_device": ("STRING", {"default": "none"}),
                 "cache_model": ("BOOLEAN", {"default": False}),
@@ -152,7 +152,7 @@ class AnymatixSeedVR2LoadVAEModel():
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("SEEDVR2_vae_model", {}),
+                "model": ("STRING", {"default": "ema_vae_fp16.safetensors"}),
                 "device": ("STRING", {"default": "cuda:0"}),
                 "offload_device": ("STRING", {"default": "none"}),
                 "cache_model": ("BOOLEAN", {"default": False}),
