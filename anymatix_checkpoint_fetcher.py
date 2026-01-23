@@ -10,6 +10,8 @@ import comfy.utils
 import folder_paths
 import sys
 from comfy_api.latest import io
+from typing import Dict, Any, Tuple
+
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import download_file, hash_string
@@ -73,36 +75,76 @@ gguf_nodes.__package__ = pkg_name
 sys.modules[nodes_mod_name] = gguf_nodes
 spec.loader.exec_module(gguf_nodes)
 
-SeedVR2LoadDiTModel = None
+# SeedVR2LoadDiTModel = None
 
-for mod in sys.modules.values():
-    if hasattr(mod, "SeedVR2LoadDiTModel"):
-        SeedVR2LoadDiTModel = mod.SeedVR2LoadDiTModel
-        break
+# for mod in sys.modules.values():
+#     if hasattr(mod, "SeedVR2LoadDiTModel"):
+#         SeedVR2LoadDiTModel = mod.SeedVR2LoadDiTModel
+#         break
 
-if SeedVR2LoadDiTModel is None:
-    raise RuntimeError("SeedVR2LoadDiTModel not loaded yet")
+# if SeedVR2LoadDiTModel is None:
+#     raise RuntimeError("SeedVR2LoadDiTModel not loaded yet")
 
-class AnymatixSeedVR2LoadDiTModel(SeedVR2LoadDiTModel):
+class AnymatixSeedVR2LoadDiTModel():
     @classmethod
-    def define_schema(cls) -> io.Schema:
-        parent = SeedVR2LoadDiTModel.define_schema()
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("SEEDVR2_model", {}),
+                "device": ("STRING", {"default": "cuda:0"}),
+                "offload_device": ("STRING", {"default": "none"}),
+                "cache_model": ("BOOLEAN", {"default": False}),
+                "blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 36, "step": 1}),
+                "swap_io_components": ("BOOLEAN", {"default": False}),
+                "attention_mode": (["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"], {"default": "sdpa"}),
+            }
+        }
+    CATEGORY = "Anymatix"
+    FUNCTION = "execute"
 
-        return io.Schema(
-            node_id="SeedVR2LoadDiTModelScriptable",
-            display_name="SeedVR2 Load DiT Model (Scriptable)",
-            category=parent.category,
-            description=parent.description,
-            inputs=[
-                io.String.Input(
-                    "model",
-                    default=parent.inputs[0].default,
-                    tooltip="DiT model filename (string, scriptable)"
-                ),
-                *parent.inputs[1:],  # device, blocks_to_swap, ecc.
-            ],
-            outputs=parent.outputs,
-        )
+    def execute(self, model: str, device: str, offload_device: str = "none",
+                      cache_model: bool = False, blocks_to_swap: int = 0, 
+                      swap_io_components: bool = False, attention_mode: str = "sdpa"):
+        
+        """
+        Create DiT model configuration for SeedVR2 main node
+        
+        Args:
+            model: Model filename to load
+            device: Target device for model execution
+            offload_device: Device to offload model to when not in use
+            cache_model: Whether to keep model loaded between runs
+            blocks_to_swap: Number of transformer blocks to swap (requires offload_device != device)
+            swap_io_components: Whether to offload I/O components (requires offload_device != device)
+            attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+            torch_compile_args: Optional torch.compile configuration from settings node
+            
+        Returns:
+            NodeOutput containing configuration dictionary for SeedVR2 main node
+            
+        Raises:
+            ValueError: If cache_model is enabled but offload_device is not set
+        """
+        # Validate cache_model configuration
+        if cache_model and offload_device == "none":
+            raise ValueError(
+                "Model caching (cache_model=True) requires offload_device to be set. "
+                f"Current: offload_device='{offload_device}'. "
+                "Please set offload_device to specify where the cached DiT model should be stored "
+                "(e.g., 'cpu' or another device). Set cache_model=False if you don't want to cache the model."
+            )
+        
+        config = {
+            "model": model,
+            "device": device,
+            "offload_device": offload_device,
+            "cache_model": cache_model,
+            "blocks_to_swap": blocks_to_swap,
+            "swap_io_components": swap_io_components,
+            "attention_mode": attention_mode,
+        }
+
+        return config
 
 def get_anymatix_models_dir(type_name: str) -> str:
     """
