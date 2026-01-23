@@ -9,6 +9,7 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 import sys
+from comfy_api.latest import io
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import download_file, hash_string
@@ -71,6 +72,37 @@ gguf_nodes = importlib.util.module_from_spec(spec)
 gguf_nodes.__package__ = pkg_name
 sys.modules[nodes_mod_name] = gguf_nodes
 spec.loader.exec_module(gguf_nodes)
+
+SeedVR2LoadDiTModel = None
+
+for mod in sys.modules.values():
+    if hasattr(mod, "SeedVR2LoadDiTModel"):
+        SeedVR2LoadDiTModel = mod.SeedVR2LoadDiTModel
+        break
+
+if SeedVR2LoadDiTModel is None:
+    raise RuntimeError("SeedVR2LoadDiTModel not loaded yet")
+
+class AnymatixSeedVR2LoadDiTModel(SeedVR2LoadDiTModel):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        parent = SeedVR2LoadDiTModel.define_schema()
+
+        return io.Schema(
+            node_id="SeedVR2LoadDiTModelScriptable",
+            display_name="SeedVR2 Load DiT Model (Scriptable)",
+            category=parent.category,
+            description=parent.description,
+            inputs=[
+                io.String.Input(
+                    "model",
+                    default=parent.inputs[0].default,
+                    tooltip="DiT model filename (string, scriptable)"
+                ),
+                *parent.inputs[1:],  # device, blocks_to_swap, ecc.
+            ],
+            outputs=parent.outputs,
+        )
 
 def get_anymatix_models_dir(type_name: str) -> str:
     """

@@ -32,6 +32,8 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixCLIPLoader2,
     AnymatixAudioEncoderLoader,
     AnymatixSAM2Loader,
+    AnymatixSeedVR2LoadDiTModel,
+ #   AnymatixSeedVR2LoadVAEModel,
 )
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
@@ -66,6 +68,8 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixSAM2Loader": AnymatixSAM2Loader,
     "AnymatixSaveJson": AnymatixSaveJson,
     "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
+    "AnymatixSeedVR2LoadDiTModel": AnymatixSeedVR2LoadDiTModel,
+ #   "AnymatixSeedVR2LoadVAEModel": AnymatixSeedVR2LoadVAEModel,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -93,6 +97,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
     "AnymatixSaveJson": "Anymatix Save Json",
     "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
+    "AnymatixSeedVR2LoadDiTModel": "Anymatix SeedVR2 Load DiT Model",
+ #   "AnymatixSeedVR2LoadVAEModel": "Anymatix SeedVR2 Load VAE Model",
 }
 
 
