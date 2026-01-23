@@ -101,7 +101,7 @@ class AnymatixSeedVR2LoadDiTModel():
         }
     CATEGORY = "Anymatix"
     FUNCTION = "execute"
-    RETURN_TYPES = ("SEEDVR2_model",)
+    RETURN_TYPES = ("SEEDVR2_DIT",)
 
     def execute(self, model: str, device: str, offload_device: str = "none",
                       cache_model: bool = False, blocks_to_swap: int = 0, 
@@ -160,7 +160,7 @@ class AnymatixSeedVR2LoadVAEModel():
         }
     CATEGORY = "Anymatix"
     FUNCTION = "execute"
-    RETURN_TYPES = ("SEEDVR2_vae_model",)
+    RETURN_TYPES = ("SEEDVR2_VAE",)
 
     def execute(self, model: str, device: str, offload_device: str = "none",
                      cache_model: bool = False, encode_tiled: bool = False,
