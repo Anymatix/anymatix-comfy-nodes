@@ -101,6 +101,7 @@ class AnymatixSeedVR2LoadDiTModel():
         }
     CATEGORY = "Anymatix"
     FUNCTION = "execute"
+    RETURN_TYPES = ("SEEDVR2_model",)
 
     def execute(self, model: str, device: str, offload_device: str = "none",
                       cache_model: bool = False, blocks_to_swap: int = 0, 
@@ -144,6 +145,74 @@ class AnymatixSeedVR2LoadDiTModel():
             "attention_mode": attention_mode,
         }
 
+        return config
+    
+class AnymatixSeedVR2LoadVAEModel():
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "vae_model": ("SEEDVR2_vae_model", {}),
+                "device": ("STRING", {"default": "cuda:0"}),
+                "offload_device": ("STRING", {"default": "none"}),
+                "cache_model": ("BOOLEAN", {"default": False}),
+            }
+        }
+    CATEGORY = "Anymatix"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("SEEDVR2_vae_model",)
+
+    def execute(self, model: str, device: str, offload_device: str = "none",
+                     cache_model: bool = False, encode_tiled: bool = False,
+                     encode_tile_size: int = 512, encode_tile_overlap: int = 64,
+                     decode_tiled: bool = False, decode_tile_size: int = 512, 
+                     decode_tile_overlap: int = 64, tile_debug: str = "false",
+                     ):
+        """
+        Create VAE model configuration for SeedVR2 main node
+        
+        Args:
+            model: Model filename to load
+            device: Target device for model execution
+            offload_device: Device to offload model to when not in use
+            cache_model: Whether to keep model loaded between runs
+            encode_tiled: Enable tiled encoding
+            encode_tile_size: Tile size for encoding
+            encode_tile_overlap: Tile overlap for encoding
+            decode_tiled: Enable tiled decoding
+            decode_tile_size: Tile size for decoding
+            decode_tile_overlap: Tile overlap for decoding
+            tile_debug: Tile visualization mode (false/encode/decode)
+            torch_compile_args: Optional torch.compile configuration from settings node
+            
+        Returns:
+            NodeOutput containing configuration dictionary for SeedVR2 main node
+            
+        Raises:
+            ValueError: If cache_model is enabled but offload_device is invalid
+        """
+        # Validate cache_model configuration
+        if cache_model and offload_device == "none":
+            raise ValueError(
+                "Model caching (cache_model=True) requires offload_device to be set. "
+                f"Current: offload_device='{offload_device}'. "
+                "Please set offload_device to specify where the cached VAE model should be stored "
+                "(e.g., 'cpu' or another device). Set cache_model=False if you don't want to cache the model."
+            )
+        
+        config = {
+            "model": model,
+            "device": device,
+            "offload_device": offload_device,
+            "cache_model": cache_model,
+            "encode_tiled": encode_tiled,
+            "encode_tile_size": encode_tile_size,
+            "encode_tile_overlap": encode_tile_overlap,
+            "decode_tiled": decode_tiled,
+            "decode_tile_size": decode_tile_size,
+            "decode_tile_overlap": decode_tile_overlap,
+            "tile_debug": tile_debug,
+        }
         return config
 
 def get_anymatix_models_dir(type_name: str) -> str:
