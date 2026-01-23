@@ -145,7 +145,7 @@ class AnymatixSeedVR2LoadDiTModel():
             "attention_mode": attention_mode,
         }
 
-        return config
+        return io.NodeOutput(config)
     
 class AnymatixSeedVR2LoadVAEModel():
     @classmethod
@@ -220,7 +220,7 @@ class AnymatixSeedVR2LoadVAEModel():
             "decode_tile_overlap": decode_tile_overlap,
             "tile_debug": tile_debug,
         }
-        return config
+        return io.NodeOutput(config)
 
 def get_anymatix_models_dir(type_name: str) -> str:
     """
