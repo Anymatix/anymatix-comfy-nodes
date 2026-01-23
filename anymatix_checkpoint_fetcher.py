@@ -152,10 +152,17 @@ class AnymatixSeedVR2LoadVAEModel():
     def INPUT_TYPES(s):
         return {
             "required": {
-                "vae_model": ("SEEDVR2_vae_model", {}),
+                "model": ("SEEDVR2_vae_model", {}),
                 "device": ("STRING", {"default": "cuda:0"}),
                 "offload_device": ("STRING", {"default": "none"}),
                 "cache_model": ("BOOLEAN", {"default": False}),
+                "encode_tiled": ("BOOLEAN", {"default": False}),
+                "encode_tile_size": ("INT", {"default": 512, "min": 64, "step": 32}),
+                "encode_tile_overlap": ("INT", {"default": 64, "min": 0, "step": 32}),
+                "decode_tiled": ("BOOLEAN", {"default": False}),
+                "decode_tile_size": ("INT", {"default": 512, "min": 64, "step": 32}),
+                "decode_tile_overlap": ("INT", {"default": 64, "min": 0, "step": 32}),
+                "tile_debug": (["false", "encode", "decode"], {"default": "false"}),
             }
         }
     CATEGORY = "Anymatix"
