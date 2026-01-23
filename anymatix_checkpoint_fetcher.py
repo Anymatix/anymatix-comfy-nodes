@@ -11,6 +11,7 @@ import folder_paths
 import sys
 from comfy_api.latest import io
 from typing import Dict, Any, Tuple
+from comfy_execution.utils import get_executing_context
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
@@ -143,6 +144,7 @@ class AnymatixSeedVR2LoadDiTModel():
             "blocks_to_swap": blocks_to_swap,
             "swap_io_components": swap_io_components,
             "attention_mode": attention_mode,
+            "node_id": get_executing_context().node_id,
         }
 
         return io.NodeOutput(config)
@@ -219,6 +221,7 @@ class AnymatixSeedVR2LoadVAEModel():
             "decode_tile_size": decode_tile_size,
             "decode_tile_overlap": decode_tile_overlap,
             "tile_debug": tile_debug,
+            "node_id": get_executing_context().node_id,
         }
         return io.NodeOutput(config)
 
