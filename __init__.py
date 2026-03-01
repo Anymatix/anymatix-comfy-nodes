@@ -564,6 +564,13 @@ async def serve_resources(_request):
         data = get_json_data(path)
         type = get_type(path)
         file_path = path.removeprefix(os.path.join(folder_paths.models_dir, type))
+        # Ensure file_size is always present: compute from disk if missing
+        if not data.get("file_size"):
+            model_filename = data.get("file_name")
+            if model_filename:
+                model_path = os.path.join(os.path.dirname(path), model_filename)
+                if os.path.isfile(model_path):
+                    data["file_size"] = os.path.getsize(model_path)
         return (data, type, file_path)
 
     contents = map(get_contents, json_files)
