@@ -550,11 +550,28 @@ async def serve_resources(_request):
     print(f"[anymatix resources] models_dir = {models_dir}")
     print(f"[anymatix resources] models_dir exists = {os.path.isdir(models_dir)}")
 
-    json_file_list = []
-    for dirpath, _, filenames in os.walk(models_dir):
-        for filename in filenames:
-            if filename.endswith(".json"):
-                json_file_list.append(os.path.join(dirpath, filename))
+    scan_roots = []
+    if os.path.isdir(models_dir):
+        scan_roots.append(os.path.abspath(models_dir))
+
+    for info in folder_paths.folder_names_and_paths.values():
+        for base_dir in info[0]:
+            if os.path.isdir(base_dir):
+                abs_base = os.path.abspath(base_dir)
+                if abs_base not in scan_roots:
+                    scan_roots.append(abs_base)
+
+    print(f"[anymatix resources] scan_roots count = {len(scan_roots)}")
+    print(f"[anymatix resources] scan_roots sample = {scan_roots[:10]}")
+
+    json_file_set = set()
+    for root in scan_roots:
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                if filename.endswith(".json"):
+                    json_file_set.add(os.path.join(dirpath, filename))
+
+    json_file_list = sorted(json_file_set)
 
     print(f"[anymatix resources] found {len(json_file_list)} JSON sidecar files")
     if len(json_file_list) == 0:
@@ -576,12 +593,22 @@ async def serve_resources(_request):
             return json.load(f)
 
     def get_type(path: str) -> str:
-        return path.removeprefix(models_dir).split(os.sep)[1]
+        abs_path = os.path.abspath(path)
+        for model_type, info in folder_paths.folder_names_and_paths.items():
+            for base_dir in info[0]:
+                abs_base = os.path.abspath(base_dir)
+                if abs_path == abs_base or abs_path.startswith(abs_base + os.sep):
+                    return model_type
+
+        rel = abs_path.removeprefix(os.path.abspath(models_dir))
+        parts = rel.split(os.sep)
+        if len(parts) > 1 and parts[1]:
+            return parts[1]
+        return "unknown"
 
     def get_contents(path: str):
         data = get_json_data(path)
         type = get_type(path)
-        file_path = path.removeprefix(os.path.join(models_dir, type))
         # Ensure file_size is always present: compute from disk if missing
         if not data.get("file_size"):
             model_filename = data.get("file_name")
@@ -589,14 +616,14 @@ async def serve_resources(_request):
                 model_path = os.path.join(os.path.dirname(path), model_filename)
                 if os.path.isfile(model_path):
                     data["file_size"] = os.path.getsize(model_path)
-        return (data, type, file_path)
+        return (data, type)
 
     result: Dict[str, list] = {}
     errors = 0
 
     for json_path in json_file_list:
         try:
-            data, type, file_path = get_contents(json_path)
+            data, type = get_contents(json_path)
             if type in result:
                 result[type].append(data)
             else:
