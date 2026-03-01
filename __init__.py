@@ -547,16 +547,22 @@ async def serve_file(request):
 @routes.get("/anymatix/resources")
 async def serve_resources(_request):
     models_dir = folder_paths.models_dir
+    models_dir_abs = os.path.abspath(models_dir)
     print(f"[anymatix resources] models_dir = {models_dir}")
     print(f"[anymatix resources] models_dir exists = {os.path.isdir(models_dir)}")
 
+    def is_models_path(path: str) -> bool:
+        abs_path = os.path.abspath(path)
+        marker = f"{os.sep}models{os.sep}"
+        return abs_path.endswith(f"{os.sep}models") or marker in abs_path
+
     scan_roots = []
-    if os.path.isdir(models_dir):
-        scan_roots.append(os.path.abspath(models_dir))
+    if os.path.isdir(models_dir_abs):
+        scan_roots.append(models_dir_abs)
 
     for info in folder_paths.folder_names_and_paths.values():
         for base_dir in info[0]:
-            if os.path.isdir(base_dir):
+            if os.path.isdir(base_dir) and is_models_path(base_dir):
                 abs_base = os.path.abspath(base_dir)
                 if abs_base not in scan_roots:
                     scan_roots.append(abs_base)
@@ -600,14 +606,19 @@ async def serve_resources(_request):
                 if abs_path == abs_base or abs_path.startswith(abs_base + os.sep):
                     return model_type
 
-        rel = abs_path.removeprefix(os.path.abspath(models_dir))
+        rel = abs_path.removeprefix(models_dir_abs)
         parts = rel.split(os.sep)
         if len(parts) > 1 and parts[1]:
             return parts[1]
         return "unknown"
 
+    def is_valid_sidecar(data: dict) -> bool:
+        return isinstance(data, dict) and isinstance(data.get("file_name"), str) and len(data.get("file_name")) > 0
+
     def get_contents(path: str):
         data = get_json_data(path)
+        if not is_valid_sidecar(data):
+            raise ValueError("not a model sidecar")
         type = get_type(path)
         # Ensure file_size is always present: compute from disk if missing
         if not data.get("file_size"):
@@ -620,6 +631,7 @@ async def serve_resources(_request):
 
     result: Dict[str, list] = {}
     errors = 0
+    skipped = 0
 
     for json_path in json_file_list:
         try:
@@ -628,13 +640,15 @@ async def serve_resources(_request):
                 result[type].append(data)
             else:
                 result[type] = [data]
+        except ValueError:
+            skipped += 1
         except Exception as e:
             errors += 1
             if errors <= 3:
                 print(f"[anymatix resources] error processing {json_path}: {e}")
 
     total_items = sum(len(v) for v in result.values())
-    print(f"[anymatix resources] returning {total_items} items across {len(result)} categories (errors: {errors})")
+    print(f"[anymatix resources] returning {total_items} items across {len(result)} categories (skipped: {skipped}, errors: {errors})")
 
     return web.json_response(result)
 
