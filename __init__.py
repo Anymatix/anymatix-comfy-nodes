@@ -546,24 +546,42 @@ async def serve_file(request):
 
 @routes.get("/anymatix/resources")
 async def serve_resources(_request):
-    json_files = (
-        os.path.join(dirpath, filename)
-        for dirpath, _, filenames in os.walk(folder_paths.models_dir)
-        for filename in filenames
-        if filename.endswith(".json")
-    )
+    models_dir = folder_paths.models_dir
+    print(f"[anymatix resources] models_dir = {models_dir}")
+    print(f"[anymatix resources] models_dir exists = {os.path.isdir(models_dir)}")
+
+    json_file_list = []
+    for dirpath, _, filenames in os.walk(models_dir):
+        for filename in filenames:
+            if filename.endswith(".json"):
+                json_file_list.append(os.path.join(dirpath, filename))
+
+    print(f"[anymatix resources] found {len(json_file_list)} JSON sidecar files")
+    if len(json_file_list) == 0:
+        # List top-level contents for debugging
+        try:
+            top_level = os.listdir(models_dir)
+            print(f"[anymatix resources] top-level in models_dir: {top_level[:20]}")
+            # Check first subfolder
+            for sub in top_level[:5]:
+                sub_path = os.path.join(models_dir, sub)
+                if os.path.isdir(sub_path):
+                    sub_contents = os.listdir(sub_path)[:10]
+                    print(f"[anymatix resources]   {sub}/ has {len(os.listdir(sub_path))} items: {sub_contents}")
+        except Exception as e:
+            print(f"[anymatix resources] error listing models_dir: {e}")
 
     def get_json_data(path: str) -> dict:
         with open(path, "r") as f:
             return json.load(f)
 
     def get_type(path: str) -> str:
-        return path.removeprefix(folder_paths.models_dir).split(os.sep)[1]
+        return path.removeprefix(models_dir).split(os.sep)[1]
 
     def get_contents(path: str):
         data = get_json_data(path)
         type = get_type(path)
-        file_path = path.removeprefix(os.path.join(folder_paths.models_dir, type))
+        file_path = path.removeprefix(os.path.join(models_dir, type))
         # Ensure file_size is always present: compute from disk if missing
         if not data.get("file_size"):
             model_filename = data.get("file_name")
@@ -573,14 +591,23 @@ async def serve_resources(_request):
                     data["file_size"] = os.path.getsize(model_path)
         return (data, type, file_path)
 
-    contents = map(get_contents, json_files)
-
     result: Dict[str, list] = {}
+    errors = 0
 
-    for data, type, file_path in contents:
-        if type in result:
-            result[type].append(data)
-        else:
-            result[type] = [data]
+    for json_path in json_file_list:
+        try:
+            data, type, file_path = get_contents(json_path)
+            if type in result:
+                result[type].append(data)
+            else:
+                result[type] = [data]
+        except Exception as e:
+            errors += 1
+            if errors <= 3:
+                print(f"[anymatix resources] error processing {json_path}: {e}")
+
+    total_items = sum(len(v) for v in result.values())
+    print(f"[anymatix resources] returning {total_items} items across {len(result)} categories (errors: {errors})")
 
     return web.json_response(result)
+
