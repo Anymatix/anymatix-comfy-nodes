@@ -604,7 +604,10 @@ async def serve_delete(request):
 
     if errors and deleted_count == 0:
         return web.Response(text=f"Failed to delete: {'; '.join(errors)}", status=500)
-    return web.Response(status=200)
+    summary = f"Deleted {deleted_count} sidecar(s)"
+    if errors:
+        summary += f" with {len(errors)} error(s): {'; '.join(errors)}"
+    return web.Response(text=summary, status=200)
 
 
 @routes.get("/anymatix/{basedir}/{filename:.+}")
