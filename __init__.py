@@ -668,23 +668,28 @@ async def serve_file(request):
 
 
 def _get_model_scan_roots():
-    """Return deduplicated list of all directories that may contain model files/sidecars."""
-    models_dir_abs = os.path.abspath(folder_paths.models_dir)
-    roots = []
+    """Return deduplicated list of all directories that may contain model files/sidecars.
+    All returned paths are normalised (abspath + normcase) for reliable comparison on Windows.
+    """
+    models_dir_abs = os.path.normcase(os.path.abspath(folder_paths.models_dir))
+    seen: set[str] = set()
+    roots: list[str] = []
     if os.path.isdir(models_dir_abs):
+        seen.add(models_dir_abs)
         roots.append(models_dir_abs)
 
     def is_models_path(path: str) -> bool:
-        abs_path = os.path.abspath(path)
+        nc = os.path.normcase(os.path.abspath(path))
         marker = f"{os.sep}models{os.sep}"
-        return abs_path.endswith(f"{os.sep}models") or marker in abs_path
+        return nc.endswith(f"{os.sep}models") or marker in nc
 
     for info in folder_paths.folder_names_and_paths.values():
         for base_dir in info[0]:
             if os.path.isdir(base_dir) and is_models_path(base_dir):
-                abs_base = os.path.abspath(base_dir)
-                if abs_base not in roots:
-                    roots.append(abs_base)
+                nc = os.path.normcase(os.path.abspath(base_dir))
+                if nc not in seen:
+                    seen.add(nc)
+                    roots.append(os.path.abspath(base_dir))
     return roots
 
 
@@ -700,14 +705,19 @@ async def serve_resources(_request):
     print(f"[anymatix resources] scan_roots count = {len(scan_roots)}")
     print(f"[anymatix resources] scan_roots sample = {scan_roots[:10]}")
 
-    json_file_set = set()
+    json_file_seen: set[str] = set()
+    json_file_list: list[str] = []
     for root in scan_roots:
         for dirpath, _, filenames in os.walk(root):
             for filename in filenames:
                 if filename.endswith(".json"):
-                    json_file_set.add(os.path.join(dirpath, filename))
+                    fpath = os.path.join(dirpath, filename)
+                    norm = os.path.normcase(os.path.abspath(fpath))
+                    if norm not in json_file_seen:
+                        json_file_seen.add(norm)
+                        json_file_list.append(fpath)
 
-    json_file_list = sorted(json_file_set)
+    json_file_list.sort()
 
     print(f"[anymatix resources] found {len(json_file_list)} JSON sidecar files")
     if len(json_file_list) == 0:
