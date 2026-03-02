@@ -506,7 +506,10 @@ async def serve_delete(request):
     print("anymatix: deleting resource")
     data = await request.json()
     url = data["url"]
-    delete_files(url, folder_paths.models_dir)
+    # Walk ALL model scan roots, not just models_dir, so models in
+    # extra_model_paths (e.g. anymatix/models/loras) are found too.
+    for root in _get_model_scan_roots():
+        delete_files(url, root)
     return web.Response(status=200)
 
 
@@ -544,6 +547,27 @@ async def serve_file(request):
 # resource_extensions = [".ckpt", ".safetensors"]
 
 
+def _get_model_scan_roots():
+    """Return deduplicated list of all directories that may contain model files/sidecars."""
+    models_dir_abs = os.path.abspath(folder_paths.models_dir)
+    roots = []
+    if os.path.isdir(models_dir_abs):
+        roots.append(models_dir_abs)
+
+    def is_models_path(path: str) -> bool:
+        abs_path = os.path.abspath(path)
+        marker = f"{os.sep}models{os.sep}"
+        return abs_path.endswith(f"{os.sep}models") or marker in abs_path
+
+    for info in folder_paths.folder_names_and_paths.values():
+        for base_dir in info[0]:
+            if os.path.isdir(base_dir) and is_models_path(base_dir):
+                abs_base = os.path.abspath(base_dir)
+                if abs_base not in roots:
+                    roots.append(abs_base)
+    return roots
+
+
 @routes.get("/anymatix/resources")
 async def serve_resources(_request):
     models_dir = folder_paths.models_dir
@@ -551,21 +575,7 @@ async def serve_resources(_request):
     print(f"[anymatix resources] models_dir = {models_dir}")
     print(f"[anymatix resources] models_dir exists = {os.path.isdir(models_dir)}")
 
-    def is_models_path(path: str) -> bool:
-        abs_path = os.path.abspath(path)
-        marker = f"{os.sep}models{os.sep}"
-        return abs_path.endswith(f"{os.sep}models") or marker in abs_path
-
-    scan_roots = []
-    if os.path.isdir(models_dir_abs):
-        scan_roots.append(models_dir_abs)
-
-    for info in folder_paths.folder_names_and_paths.values():
-        for base_dir in info[0]:
-            if os.path.isdir(base_dir) and is_models_path(base_dir):
-                abs_base = os.path.abspath(base_dir)
-                if abs_base not in scan_roots:
-                    scan_roots.append(abs_base)
+    scan_roots = _get_model_scan_roots()
 
     print(f"[anymatix resources] scan_roots count = {len(scan_roots)}")
     print(f"[anymatix resources] scan_roots sample = {scan_roots[:10]}")
