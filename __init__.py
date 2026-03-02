@@ -516,17 +516,19 @@ async def serve_delete(request):
         return web.Response(text="Missing or invalid 'url' field", status=400)
 
     scan_roots = _get_model_scan_roots()
+    log_lines = [f"url={url[:120]}", f"scan_roots={len(scan_roots)}"]
 
     def _is_inside_scan_root(path: str) -> bool:
         """Return True when *path* resolves inside one of the scan roots."""
-        abs_path = os.path.abspath(path)
+        rp = os.path.normcase(os.path.abspath(path))
         return any(
-            abs_path == root or abs_path.startswith(root + os.sep)
+            rp == os.path.normcase(root) or rp.startswith(os.path.normcase(root) + os.sep)
             for root in scan_roots
         )
 
     # Locate the sidecar JSON(s) whose stored "url" matches the requested URL.
-    # Collect (sidecar_path, model_path_or_None) tuples.
+    # Use a set of normalised sidecar paths to deduplicate overlapping scan roots.
+    seen_sidecars: set[str] = set()
     targets: list[tuple[str, str | None]] = []
 
     for root in scan_roots:
@@ -535,6 +537,9 @@ async def serve_delete(request):
                 if not fname.endswith(".json"):
                     continue
                 json_path = os.path.join(dirpath, fname)
+                norm_path = os.path.normcase(os.path.abspath(json_path))
+                if norm_path in seen_sidecars:
+                    continue
                 try:
                     with open(json_path, "r") as f:
                         sidecar = json.load(f)
@@ -549,9 +554,13 @@ async def serve_delete(request):
                 if url != base_url and not url.startswith(base_url + "?") and not url.startswith(base_url + "&"):
                     continue
 
+                seen_sidecars.add(norm_path)
+
                 # Validate the sidecar path is inside a scan root
                 if not _is_inside_scan_root(json_path):
-                    print(f"[delete_resource] BLOCKED: sidecar outside scan roots: {json_path}")
+                    msg = f"BLOCKED sidecar outside roots: {json_path}"
+                    print(f"[delete_resource] {msg}")
+                    log_lines.append(msg)
                     continue
 
                 model_path = None
@@ -560,7 +569,9 @@ async def serve_delete(request):
                     candidate = os.path.join(dirpath, model_file)
                     abs_candidate = os.path.abspath(candidate)
                     if not _is_inside_scan_root(abs_candidate):
-                        print(f"[delete_resource] BLOCKED: model file outside scan roots: {abs_candidate}")
+                        msg = f"BLOCKED model outside roots: {abs_candidate}"
+                        print(f"[delete_resource] {msg}")
+                        log_lines.append(msg)
                         continue
                     if os.path.isfile(abs_candidate):
                         # Check if another sidecar still references this model file
@@ -575,38 +586,50 @@ async def serve_delete(request):
                                         break
                                 except Exception:
                                     pass
-                        if not referenced:
+                        if referenced:
+                            log_lines.append(f"model shared, sidecar-only: {fname}")
+                        else:
                             model_path = abs_candidate
+                    else:
+                        log_lines.append(f"model file missing on disk: {model_file}")
 
                 targets.append((os.path.abspath(json_path), model_path))
 
+    log_lines.append(f"targets={len(targets)}")
+
     if not targets:
-        print(f"[delete_resource] No matching sidecar found for url")
-        return web.Response(text="Resource not found", status=404)
+        summary = " | ".join(log_lines) + " | NOT FOUND"
+        print(f"[delete_resource] {summary}")
+        return web.Response(text=summary, status=404)
 
     # Atomic delete: attempt model file first, then sidecar.
     # If the model file cannot be removed, skip both.
     errors = []
-    deleted_count = 0
+    deleted_sidecars = []
+    deleted_models = []
     for sidecar_path, model_path in targets:
         try:
             if model_path:
                 os.remove(model_path)
+                deleted_models.append(os.path.basename(model_path))
                 print(f"[delete_resource] deleted model: {model_path}")
             os.remove(sidecar_path)
+            deleted_sidecars.append(os.path.basename(sidecar_path))
             print(f"[delete_resource] deleted sidecar: {sidecar_path}")
-            deleted_count += 1
         except Exception as e:
-            errors.append(str(e))
+            errors.append(f"{type(e).__name__}: {e}")
             print(f"[delete_resource] ERROR: {e}")
-            # If model was deleted but sidecar failed, this is an inconsistency
-            # but we don't silently swallow it
 
-    if errors and deleted_count == 0:
-        return web.Response(text=f"Failed to delete: {'; '.join(errors)}", status=500)
-    summary = f"Deleted {deleted_count} sidecar(s)"
+    log_lines.append(f"deleted_sidecars={deleted_sidecars}")
+    log_lines.append(f"deleted_models={deleted_models}")
     if errors:
-        summary += f" with {len(errors)} error(s): {'; '.join(errors)}"
+        log_lines.append(f"errors={errors}")
+
+    summary = " | ".join(log_lines)
+    print(f"[delete_resource] {summary}")
+
+    if errors and not deleted_sidecars:
+        return web.Response(text=summary, status=500)
     return web.Response(text=summary, status=200)
 
 
