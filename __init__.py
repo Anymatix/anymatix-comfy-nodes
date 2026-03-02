@@ -620,13 +620,13 @@ async def serve_resources(_request):
         if not is_valid_sidecar(data):
             raise ValueError("not a model sidecar")
         type = get_type(path)
-        # Ensure file_size is always present: compute from disk if missing
-        if not data.get("file_size"):
-            model_filename = data.get("file_name")
-            if model_filename:
-                model_path = os.path.join(os.path.dirname(path), model_filename)
-                if os.path.isfile(model_path):
-                    data["file_size"] = os.path.getsize(model_path)
+        # file_size MUST always come from the actual file on disk,
+        # never from sidecar data (which reflects Content-Length at download time)
+        model_filename = data.get("file_name")
+        if model_filename:
+            model_path = os.path.join(os.path.dirname(path), model_filename)
+            if os.path.isfile(model_path):
+                data["file_size"] = os.path.getsize(model_path)
         return (data, type)
 
     result: Dict[str, list] = {}
