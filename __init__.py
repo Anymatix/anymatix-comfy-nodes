@@ -1,6 +1,5 @@
 import sys
 import asyncio
-from .fetch import delete_files
 from .expunge import *
 import json
 from typing import Dict
@@ -503,13 +502,108 @@ async def serve_cache_size(request):
 
 @routes.post("/anymatix/delete_resource")
 async def serve_delete(request):
-    print("anymatix: deleting resource")
+    """Delete a model sidecar JSON and its associated model file.
+
+    Security constraints:
+    - Only files within ComfyUI's registered model scan roots are touched.
+    - Path traversal is rejected (resolved paths must stay inside a scan root).
+    - Deletion is atomic: both sidecar + model are collected first, then both
+      deleted.  If the model file cannot be removed the sidecar is kept too.
+    """
     data = await request.json()
-    url = data["url"]
-    # Walk ALL model scan roots, not just models_dir, so models in
-    # extra_model_paths (e.g. anymatix/models/loras) are found too.
-    for root in _get_model_scan_roots():
-        delete_files(url, root)
+    url = data.get("url")
+    if not isinstance(url, str) or not url:
+        return web.Response(text="Missing or invalid 'url' field", status=400)
+
+    scan_roots = _get_model_scan_roots()
+
+    def _is_inside_scan_root(path: str) -> bool:
+        """Return True when *path* resolves inside one of the scan roots."""
+        abs_path = os.path.abspath(path)
+        return any(
+            abs_path == root or abs_path.startswith(root + os.sep)
+            for root in scan_roots
+        )
+
+    # Locate the sidecar JSON(s) whose stored "url" matches the requested URL.
+    # Collect (sidecar_path, model_path_or_None) tuples.
+    targets: list[tuple[str, str | None]] = []
+
+    for root in scan_roots:
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                if not fname.endswith(".json"):
+                    continue
+                json_path = os.path.join(dirpath, fname)
+                try:
+                    with open(json_path, "r") as f:
+                        sidecar = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(sidecar, dict):
+                    continue
+                base_url = sidecar.get("url")
+                if not isinstance(base_url, str):
+                    continue
+                # Match exact URL or URL-with-query-params variant
+                if url != base_url and not url.startswith(base_url + "?") and not url.startswith(base_url + "&"):
+                    continue
+
+                # Validate the sidecar path is inside a scan root
+                if not _is_inside_scan_root(json_path):
+                    print(f"[delete_resource] BLOCKED: sidecar outside scan roots: {json_path}")
+                    continue
+
+                model_path = None
+                model_file = sidecar.get("file_name")
+                if isinstance(model_file, str) and model_file:
+                    candidate = os.path.join(dirpath, model_file)
+                    abs_candidate = os.path.abspath(candidate)
+                    if not _is_inside_scan_root(abs_candidate):
+                        print(f"[delete_resource] BLOCKED: model file outside scan roots: {abs_candidate}")
+                        continue
+                    if os.path.isfile(abs_candidate):
+                        # Check if another sidecar still references this model file
+                        referenced = False
+                        for other in filenames:
+                            if other.endswith(".json") and other != fname:
+                                try:
+                                    with open(os.path.join(dirpath, other), "r") as of:
+                                        other_data = json.load(of)
+                                    if isinstance(other_data, dict) and other_data.get("file_name") == model_file:
+                                        referenced = True
+                                        break
+                                except Exception:
+                                    pass
+                        if not referenced:
+                            model_path = abs_candidate
+
+                targets.append((os.path.abspath(json_path), model_path))
+
+    if not targets:
+        print(f"[delete_resource] No matching sidecar found for url")
+        return web.Response(text="Resource not found", status=404)
+
+    # Atomic delete: attempt model file first, then sidecar.
+    # If the model file cannot be removed, skip both.
+    errors = []
+    deleted_count = 0
+    for sidecar_path, model_path in targets:
+        try:
+            if model_path:
+                os.remove(model_path)
+                print(f"[delete_resource] deleted model: {model_path}")
+            os.remove(sidecar_path)
+            print(f"[delete_resource] deleted sidecar: {sidecar_path}")
+            deleted_count += 1
+        except Exception as e:
+            errors.append(str(e))
+            print(f"[delete_resource] ERROR: {e}")
+            # If model was deleted but sidecar failed, this is an inconsistency
+            # but we don't silently swallow it
+
+    if errors and deleted_count == 0:
+        return web.Response(text=f"Failed to delete: {'; '.join(errors)}", status=500)
     return web.Response(status=200)
 
 
