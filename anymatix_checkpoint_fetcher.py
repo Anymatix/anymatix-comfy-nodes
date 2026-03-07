@@ -12,6 +12,8 @@ import sys
 from comfy_api.latest import io
 from typing import Dict, Any, Tuple
 from comfy_execution.utils import get_executing_context
+from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
+from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAELoader
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
@@ -358,6 +360,52 @@ class AnymatixAudioEncoderLoader:
             raise RuntimeError("ERROR: audio encoder file is invalid")
         return (audio_encoder,)
 
+class AnymatixLTXVAudioVAELoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "ckpt_name": ("STRING", ),}}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "load_vae"
+    CATEGORY = "Anymatix"
+
+    def load_vae(self, ckpt_name):
+        return LTXVAudioVAELoader.execute(os.path.basename(ckpt_name)).result
+
+class AnymatixLTXAVTextEncoderLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "text_encoder": ("STRING", ),
+                "ckpt_name": ("STRING", ),
+                "device": (["default", "cpu"], {"default": "default"}),
+            }
+        }
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+    CATEGORY = "Anymatix"
+
+    def load_clip(self, text_encoder, ckpt_name, device="default"):
+        return LTXAVTextEncoderLoader.execute(
+            os.path.basename(text_encoder),
+            os.path.basename(ckpt_name),
+            device,
+        ).result
+
+class AnymatixLatentUpscaleModelLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model_name": ("STRING", ),}}
+
+    RETURN_TYPES = ("LATENT_UPSCALE_MODEL",)
+    FUNCTION = "load_model"
+    CATEGORY = "Anymatix"
+
+    def load_model(self, model_name):
+        return LatentUpscaleModelLoader.execute(os.path.basename(model_name)).result
+
 class AnymatixUNETLoader(UNETLoader):
     @classmethod
     def INPUT_TYPES(s):
@@ -620,6 +668,7 @@ dirmap = {
     "lora": "loras",
     "controlnet": "controlnet",
     "upscale": "upscale_models",
+    "latent_upscale": "latent_upscale_models",
     "vae": "vae",
     "diffusion_model": "diffusion_models",
     "diffusion_models/GGUF": "diffusion_models",
@@ -975,4 +1024,3 @@ if __name__ == "__main__":
         print("Test fetch result:", result)
     except Exception as e:
         print("Test fetch failed:", e)
-

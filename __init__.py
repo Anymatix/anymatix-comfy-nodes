@@ -30,6 +30,9 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixQuadrupleCLIPLoader,
     AnymatixCLIPLoader2,
     AnymatixAudioEncoderLoader,
+    AnymatixLTXVAudioVAELoader,
+    AnymatixLTXAVTextEncoderLoader,
+    AnymatixLatentUpscaleModelLoader,
     AnymatixSAM2Loader,
     AnymatixSeedVR2LoadDiTModel,
     AnymatixSeedVR2LoadVAEModel,
@@ -64,6 +67,9 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixQuadrupleCLIPLoader": AnymatixQuadrupleCLIPLoader,
     "AnymatixCLIPLoader2": AnymatixCLIPLoader2,
     "AnymatixAudioEncoderLoader": AnymatixAudioEncoderLoader,
+    "AnymatixLTXVAudioVAELoader": AnymatixLTXVAudioVAELoader,
+    "AnymatixLTXAVTextEncoderLoader": AnymatixLTXAVTextEncoderLoader,
+    "AnymatixLatentUpscaleModelLoader": AnymatixLatentUpscaleModelLoader,
     "AnymatixSAM2Loader": AnymatixSAM2Loader,
     "AnymatixSaveJson": AnymatixSaveJson,
     "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
@@ -93,6 +99,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixQuadrupleCLIPLoader": "Anymatix Quadruple CLIP Loader",
     "AnymatixCLIPLoader2": "Anymatix CLIP Loader 2",
     "AnymatixAudioEncoderLoader": "Anymatix Audio Encoder Loader",
+    "AnymatixLTXVAudioVAELoader": "Anymatix LTXV Audio VAE Loader",
+    "AnymatixLTXAVTextEncoderLoader": "Anymatix LTX Audio Text Encoder Loader",
+    "AnymatixLatentUpscaleModelLoader": "Anymatix Latent Upscale Model Loader",
     "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
     "AnymatixSaveJson": "Anymatix Save Json",
     "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
@@ -791,4 +800,3 @@ async def serve_resources(_request):
     print(f"[anymatix resources] returning {total_items} items across {len(result)} categories (skipped: {skipped}, errors: {errors})")
 
     return web.json_response(result)
-
