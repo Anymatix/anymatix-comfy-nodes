@@ -106,7 +106,7 @@ class AnymatixSaveAnimatedMP4:
                 "video": ("VIDEO",),
                 "output_path": ("STRING", {"default": "anymatix/results", "multiline": False}),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
-                "quality": (list(cls.codec_presets.keys()), {"default": "web_compatible"}),
+                "quality": (list(cls.codec_presets.keys()), {"default": "high_quality"}),
             },
         }
 
