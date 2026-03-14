@@ -448,29 +448,14 @@ async def serve_expunge(request):
     input_assets: list[str] = data.get("inputAssets", [])
     computation_results: list[str] = data.get("computationResults", [])
     delete_hashes: list[str] = data.get("delete", [])
+    clear_all = bool(data.get("clearAll", False))
 
-    # Perform normal expunge
-    await expunge_differentiated(
-        input_assets, computation_results, outdir, folder_paths.input_directory
-    )
-
-    # Clean up temporary upload files (.tmp) in input directory
-    # These are incomplete uploads that should be removed during cache cleanup
-    temp_files_deleted = []
-    try:
-        for tmp_file in Path(folder_paths.input_directory).glob("*.tmp"):
-            try:
-                # Check if file is old (more than 24 hours)
-                # Recent .tmp files might be active uploads
-                if time.time() - tmp_file.stat().st_mtime > 86400:  # 24 hours
-                    tmp_file.unlink()
-                    temp_files_deleted.append(str(tmp_file.name))
-            except Exception as e:
-                print(f"anymatix: failed to delete temp upload file {tmp_file}: {e}")
-        if temp_files_deleted:
-            print(f"anymatix: cleaned up {len(temp_files_deleted)} old temporary upload files")
-    except Exception as e:
-        print(f"anymatix: error during temp file cleanup: {e}")
+    if clear_all:
+        await clear_anymatix_cache(outdir, folder_paths.input_directory)
+    else:
+        await expunge_differentiated(
+            input_assets, computation_results, outdir, folder_paths.input_directory
+        )
 
     # If delete parameter is present, delete those hashes from results and input directories
     from .expunge import hash_pattern, input_asset_pattern
@@ -479,9 +464,9 @@ async def serve_expunge(request):
         # Delete computation result dir if hash matches
         if hash_pattern.match(h):
             result_path = Path(outdir) / h
-            if result_path.exists() and result_path.is_dir():
+            if result_path.exists():
                 try:
-                    shutil.rmtree(result_path)
+                    delete_results_entry(result_path)
                     deleted.append(str(result_path))
                 except Exception as e:
                     print(f"Failed to delete computation result {result_path}: {e}")

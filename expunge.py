@@ -1,31 +1,4 @@
 import re
-import os
-from pathlib import Path
-
-def delete_file_and_cleanup_dir(file_path: Path, results_dir: str):
-    """
-    Delete a single file and, if its parent output directory is empty, delete the directory.
-    TODO: If output folders can have more than one level of hierarchy, make this logic more robust.
-    """
-    try:
-        file_path.unlink()
-        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-            f.write(f"Deleted file: {file_path}\n")
-    except Exception as e:
-        with open(Path(results_dir) / "error.txt", "a") as f:
-            f.write(f"Failed to remove file: {file_path} - {e}\n")
-    parent_dir = file_path.parent
-    # TODO: If output folders can have more than one level of hierarchy, make this logic more robust.
-    remaining_files = [f for f in parent_dir.iterdir()]
-    if not remaining_files:
-        try:
-            parent_dir.rmdir()
-            with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                f.write(f"Deleted empty output directory: {parent_dir}\n")
-        except Exception as e:
-            with open(Path(results_dir) / "error.txt", "a") as f:
-                f.write(f"Failed to remove output directory: {parent_dir} - {e}\n")
-import re
 import shutil
 import os
 from pathlib import Path
@@ -35,6 +8,17 @@ hash_pattern = re.compile(r"^[a-f0-9]{64}$")
 input_asset_pattern = re.compile(
     r"^[a-f0-9]{64}\.[a-zA-Z0-9]+$"
 )  # hash.extension format
+
+
+def delete_results_entry(path: Path):
+    if not path.exists():
+        return
+
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=False)
+        return
+
+    path.unlink()
 
 
 async def find_expunge_computation_results(
@@ -75,80 +59,41 @@ async def expunge_differentiated(
     )
     input_files = await find_expunge_input_assets(input_assets, input_dir)
 
-    # Log what we're keeping for debugging
-    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-        f.write(f"Keeping {len(input_assets)} input assets\n")
-        f.write(f"Keeping {len(computation_results)} computation results\n")
-        f.write(f"Input assets: {input_assets}\n")
-        f.write(f"Computation results: {computation_results}\n")
-
-    # Remove computation result directories
     for h in computation_hashes:
         results_path = Path(results_dir) / h
         posixpath = results_path.as_posix()
-        with open(Path(results_dir) / "try_remove.txt", "a") as f:
-            f.write(f"Computation result: {results_path}\n")
-        if pattern.match(posixpath):  # Extra sanity check
-            if results_path.exists() and results_path.is_dir():
-                # Remove files inside the output directory
-                for file in results_path.iterdir():
-                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                        f.write(f"Attempting to delete file: {file} in {results_path}\n")
-                    try:
-                        file.unlink()
-                        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                            f.write(f"Deleted file: {file} in {results_path}\n")
-                    except Exception as e:
-                        with open(Path(results_dir) / "error.txt", "a") as f:
-                            f.write(f"Failed to remove file: {file} in {results_path} - {e}\n")
-                # Check if directory is empty after file deletion
-                with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                    f.write(f"Checking if directory is empty: {results_path}\n")
-                if not any(results_path.iterdir()):
-                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                        f.write(f"Directory is empty, attempting to delete: {results_path}\n")
-                    try:
-                        results_path.rmdir()
-                        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                            f.write(f"Deleted empty output directory: {results_path}\n")
-                    except Exception as e:
-                        with open(Path(results_dir) / "error.txt", "a") as f:
-                            f.write(f"Failed to remove output directory: {results_path} - {e}\n")
-                else:
-                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                        f.write(f"Directory not empty after file deletion: {results_path}\n")
-            # Final explicit check after all deletions
-            with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                f.write(f"Final check if directory is empty: {results_path}\n")
-            if results_path.exists() and results_path.is_dir() and not any(results_path.iterdir()):
-                with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                    f.write(f"Final check: Directory is empty, attempting to delete: {results_path}\n")
-                try:
-                    results_path.rmdir()
-                    with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                        f.write(f"Final check: Deleted empty output directory: {results_path}\n")
-                except Exception as e:
-                    with open(Path(results_dir) / "error.txt", "a") as f:
-                        f.write(f"Final check: Failed to remove output directory: {results_path} - {e}\n")
-        else:
-            with open(Path(results_dir) / "error.txt", "a") as f:
-                f.write(f"Failed to remove computation result: {results_path}\n")
+        if pattern.match(posixpath) and results_path.exists():
+            delete_results_entry(results_path)
 
-    # Remove input asset files
     for filename in input_files:
         input_path = Path(input_dir) / filename
-        with open(Path(results_dir) / "try_remove.txt", "a") as f:
-            f.write(f"Input asset: {input_path}\n")
-        with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-            f.write(f"Attempting to delete input asset: {input_path}\n")
-        try:
+        if input_path.exists():
             os.remove(input_path)
-            with open(Path(results_dir) / "expunge_log.txt", "a") as f:
-                f.write(f"Deleted input asset: {input_path}\n")
-        except Exception as e:
-            with open(Path(results_dir) / "error.txt", "a") as f:
-                f.write(f"Failed to remove input asset: {input_path} - {e}\n")
+
+
+async def clear_anymatix_cache(results_dir: str, input_dir: str):
+    results_path = Path(results_dir)
+    results_path.mkdir(parents=True, exist_ok=True)
+
+    for child in list(results_path.iterdir()):
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=False)
+        else:
+            child.unlink()
+
+    input_path = Path(input_dir)
+    if not input_path.exists():
+        return
+
+    for child in list(input_path.iterdir()):
+        if input_asset_pattern.match(child.name) or child.name.endswith(".tmp"):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=False)
+            else:
+                child.unlink()
 
 
 async def count_outputs(dir: str):
-    return len(os.listdir(dir))
+    if not os.path.isdir(dir):
+        return 0
+    return len([name for name in os.listdir(dir) if hash_pattern.match(name)])
