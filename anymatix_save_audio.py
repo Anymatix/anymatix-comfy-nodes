@@ -1,5 +1,4 @@
 import os
-import json
 import io
 import av
 import folder_paths
@@ -43,65 +42,78 @@ class AnymatixSaveAudio:
             print(f"anymatix: skipping audio save - no audio data available")
             return {"ui": {"audio": []}}
         
-        output_path = os.path.join(self.output_dir, output_path)
-        os.makedirs(output_path, exist_ok=True)
+        full_output_path = os.path.join(self.output_dir, output_path)
+        os.makedirs(full_output_path, exist_ok=True)
 
-        print(f"anymatix: saving audio to {output_path}")
+        print(f"anymatix: saving audio to {full_output_path}")
 
         results = []
 
         for batch_number, waveform in enumerate(audio["waveform"].cpu()):
-            # Use filename_prefix directly without counter
             file = f"{filename_prefix}.mp3"
-            output_file = os.path.abspath(os.path.join(output_path, file))
+            output_file = os.path.abspath(os.path.join(full_output_path, file))
 
             sample_rate = audio["sample_rate"]
 
-            # Create output with MP3 format
-            output_buffer = io.BytesIO()
-            output_container = av.open(output_buffer, mode='w', format='mp3')
+            try:
+                # Create output with MP3 format
+                output_buffer = io.BytesIO()
+                output_container = av.open(output_buffer, mode='w', format='mp3')
 
-            layout = 'mono' if waveform.shape[0] == 1 else 'stereo'
-            out_stream = output_container.add_stream("libmp3lame", rate=sample_rate, layout=layout)
-            
-            # Set quality/bitrate
-            if quality == "V0":
-                out_stream.codec_context.qscale = 1
-            elif quality == "128k":
-                out_stream.bit_rate = 128000
-            elif quality == "192k":
-                out_stream.bit_rate = 192000
-            elif quality == "256k":
-                out_stream.bit_rate = 256000
-            elif quality == "320k":
-                out_stream.bit_rate = 320000
+                layout = 'mono' if waveform.shape[0] == 1 else 'stereo'
+                out_stream = output_container.add_stream("libmp3lame", rate=sample_rate, layout=layout)
 
-            frame = av.AudioFrame.from_ndarray(
-                waveform.movedim(0, 1).reshape(1, -1).float().numpy(),
-                format='flt',
-                layout=layout
-            )
-            frame.sample_rate = sample_rate
-            frame.pts = 0
-            output_container.mux(out_stream.encode(frame))
+                # Set quality/bitrate
+                if quality == "V0":
+                    out_stream.codec_context.qscale = 1
+                elif quality == "128k":
+                    out_stream.bit_rate = 128000
+                elif quality == "192k":
+                    out_stream.bit_rate = 192000
+                elif quality == "256k":
+                    out_stream.bit_rate = 256000
+                elif quality == "320k":
+                    out_stream.bit_rate = 320000
 
-            # Flush encoder
-            output_container.mux(out_stream.encode(None))
+                frame = av.AudioFrame.from_ndarray(
+                    waveform.movedim(0, 1).reshape(1, -1).float().numpy(),
+                    format='flt',
+                    layout=layout
+                )
+                frame.sample_rate = sample_rate
+                frame.pts = 0
+                output_container.mux(out_stream.encode(frame))
 
-            # Close container
-            output_container.close()
+                # Flush encoder
+                output_container.mux(out_stream.encode(None))
 
-            # Write the output to file
-            output_buffer.seek(0)
-            with open(output_file, 'wb') as f:
-                f.write(output_buffer.getbuffer())
+                # Close container
+                output_container.close()
 
-            print(f"Audio file saved to: {output_file}")
+                # Write the output to file and fsync so it is visible to the
+                # serving layer immediately after execution_success.
+                output_buffer.seek(0)
+                with open(output_file, 'wb') as f:
+                    f.write(output_buffer.getbuffer())
+                    f.flush()
+                    os.fsync(f.fileno())
 
-            results.append({
-                "filename": file,
-                "subfolder": "",
-                "type": self.type
-            })
+                # Verify output
+                if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+                    print(f"Error: Audio output {output_file} was not created or is empty")
+                    return {"ui": {"audio": []}}
+
+                file_size = os.path.getsize(output_file)
+                print(f"Audio file saved to: {output_file} ({file_size:,} bytes)")
+
+                results.append({
+                    "filename": file,
+                    "subfolder": "",
+                    "type": self.type
+                })
+
+            except Exception as e:
+                print(f"Error encoding audio to {output_file}: {e}")
+                return {"ui": {"audio": []}}
 
         return {"ui": {"audio": results}}
