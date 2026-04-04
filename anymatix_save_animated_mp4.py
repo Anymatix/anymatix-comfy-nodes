@@ -4,6 +4,7 @@ import folder_paths
 import subprocess
 import tempfile
 import shutil
+import sys
 
 # Try to import imageio-ffmpeg for automatic FFmpeg management
 try:
@@ -48,6 +49,48 @@ def check_ffmpeg():
         return False, None
 
 FFMPEG_AVAILABLE, FFMPEG_EXE = check_ffmpeg()
+
+
+def list_available_encoders(ffmpeg_exe):
+    try:
+        result = subprocess.run(
+            [ffmpeg_exe, '-hide_banner', '-encoders'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        return result.stdout + result.stderr
+    except Exception:
+        return ""
+
+
+def get_video_encoder_candidates(ffmpeg_exe, preset):
+    encoders_output = list_available_encoders(ffmpeg_exe)
+    candidates = []
+
+    if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders_output:
+        candidates.append({
+            'name': 'h264_videotoolbox',
+            'args': [
+                '-c:v', 'h264_videotoolbox',
+                '-b:v', '12M',
+                '-maxrate', '18M',
+                '-bufsize', '24M'
+            ]
+        })
+
+    candidates.append({
+        'name': preset['codec'],
+        'args': [
+            '-c:v', preset['codec'],
+            '-profile:v', preset['profile'],
+            '-level', preset['level'],
+            '-crf', preset['crf']
+        ]
+    })
+
+    return candidates
 
 
 class AnymatixSaveAnimatedMP4:
@@ -219,86 +262,104 @@ class AnymatixSaveAnimatedMP4:
                     print(f"Warning: Could not process audio: {e}")
                     audio_file_path = None
             
-            # Build FFmpeg command with pipe input (rawvideo)
-            ffmpeg_cmd = [
-                FFMPEG_EXE,
-                '-y',
-                '-f', 'rawvideo',
-                '-vcodec', 'rawvideo',
-                '-s', f'{width}x{height}',
-                '-pix_fmt', 'rgb24',
-                '-r', str(fps),
-                '-i', '-',  # Read from stdin
-            ]
-            
-            # Add audio input if available
-            if audio_file_path is not None:
-                ffmpeg_cmd.extend(['-i', audio_file_path])
-            
-            # Video encoding options
-            ffmpeg_cmd.extend([
-                '-c:v', preset['codec'],
-                '-profile:v', preset['profile'],
-                '-level', preset['level'],
-                '-pix_fmt', preset['pix_fmt'],
-                '-crf', preset['crf'],
-                '-movflags', '+faststart',
-            ])
-            
-            # Audio encoding options
-            if audio_file_path is not None:
+            process = None
+            stdout = b""
+            stderr = b""
+            last_error = None
+
+            for encoder_candidate in get_video_encoder_candidates(FFMPEG_EXE, preset):
+                ffmpeg_cmd = [
+                    FFMPEG_EXE,
+                    '-y',
+                    '-f', 'rawvideo',
+                    '-vcodec', 'rawvideo',
+                    '-s', f'{width}x{height}',
+                    '-pix_fmt', 'rgb24',
+                    '-r', str(fps),
+                    '-i', '-',
+                ]
+
+                if audio_file_path is not None:
+                    ffmpeg_cmd.extend(['-i', audio_file_path])
+
                 ffmpeg_cmd.extend([
-                    '-c:a', 'aac',
-                    '-b:a', '192k',
-                    '-shortest'
+                    '-sws_flags', 'lanczos+accurate_rnd+full_chroma_int',
+                    '-pix_fmt', preset['pix_fmt'],
+                    '-fps_mode', 'cfr',
+                    '-r', str(fps),
+                    '-movflags', '+faststart',
                 ])
-            
-            # GOP settings for high quality
-            if quality == "high quality":
+
+                ffmpeg_cmd.extend(encoder_candidate['args'])
+
+                if audio_file_path is not None:
+                    ffmpeg_cmd.extend([
+                        '-c:a', 'aac',
+                        '-b:a', '192k',
+                        '-shortest'
+                    ])
+
+                gop = str(max(12, int(round(fps * 2))))
+                keyint_min = str(max(12, int(round(fps))))
                 ffmpeg_cmd.extend([
-                    '-g', preset['g'],
-                    '-keyint_min', preset['min_keyint'],
-                    '-sc_threshold', preset['sc_threshold'],
+                    '-g', preset.get('g', gop),
+                    '-keyint_min', preset.get('min_keyint', keyint_min),
+                    '-sc_threshold', preset.get('sc_threshold', '0'),
                 ])
-            
-            if 'preset' in preset:
-                ffmpeg_cmd.extend(['-preset', preset['preset']])
-            
-            ffmpeg_cmd.append(file_path)
-            
-            print(f"Starting FFmpeg pipe encoding...")
-            
-            # Start FFmpeg process with pipe
-            process = subprocess.Popen(
-                ffmpeg_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Stream frames directly to FFmpeg - no temp files!
-            import comfy.utils
-            pbar = comfy.utils.ProgressBar(total_frames)
-            
-            for i, image in enumerate(images):
-                # Convert to uint8 RGB and get raw bytes
-                img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
-                # Write raw RGB bytes directly to FFmpeg stdin
-                process.stdin.write(img_np.tobytes())
-                pbar.update(1)
-            
-            # Close stdin and wait for FFmpeg to finish
-            process.stdin.close()
-            stdout, stderr = process.communicate(timeout=300)
+
+                if encoder_candidate['name'] == preset['codec'] and 'preset' in preset:
+                    ffmpeg_cmd.extend(['-preset', preset['preset']])
+
+                ffmpeg_cmd.append(file_path)
+
+                print(f"Starting FFmpeg pipe encoding with {encoder_candidate['name']}...")
+
+                process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
+                import comfy.utils
+                pbar = comfy.utils.ProgressBar(total_frames)
+
+                try:
+                    for image in images:
+                        img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
+                        process.stdin.write(img_np.tobytes())
+                        pbar.update(1)
+
+                    process.stdin.close()
+                    process.stdin = None
+                    stdout, stderr = process.communicate(timeout=300)
+                except Exception as encoder_error:
+                    last_error = encoder_error
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                    print(f"Encoder {encoder_candidate['name']} failed: {encoder_error}")
+                    continue
+
+                if process.returncode == 0:
+                    print(f"FFmpeg encoding succeeded with {encoder_candidate['name']}")
+                    break
+
+                last_error = RuntimeError(stderr.decode())
+                print(f"Encoder {encoder_candidate['name']} failed, trying fallback...")
+            else:
+                if temp_dir is not None:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                print("FFmpeg encoding failed!")
+                print(f"Error: {stderr.decode()}")
+                if last_error is not None:
+                    print(f"Last error: {last_error}")
+                return {"ui": {"images": [], "animated": (True,)}}
             
             # Cleanup temp audio file
             if temp_dir is not None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            
-            if process.returncode != 0:
-                print("FFmpeg encoding failed!")
-                print(f"Error: {stderr.decode()}")
-                return {"ui": {"images": [], "animated": (True,)}}
             
             # Verify output and ensure file is fully synced to disk
             # Without fsync, the UI may try to fetch the file before it's fully written

@@ -2,6 +2,34 @@ import json as json_module
 import os
 import folder_paths
 
+
+def to_json_serializable(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(key): to_json_serializable(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [to_json_serializable(item) for item in value]
+
+    if hasattr(value, "tolist"):
+        return to_json_serializable(value.tolist())
+
+    if hasattr(value, "item"):
+        try:
+            return to_json_serializable(value.item())
+        except Exception:
+            pass
+
+    if hasattr(value, "cpu") and hasattr(value, "numpy"):
+        return to_json_serializable(value.cpu().numpy().tolist())
+
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
 class AnymatixSaveJson:
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
@@ -51,22 +79,7 @@ class AnymatixSaveJson:
 
         try:
             with open(file_path, "w") as f:
-                # We wrap primitive values in a structure if needed, or just dump them.
-                # Anymatix app expects the content of the file to be the value? 
-                # Or does it expect a specific JSON structure?
-                # Looking at AnymatixImageSave, it dumps {"count": ...}.
-                # But here we want to observe the VALUE.
-                # So we should probably dump the value directly.
-                
-                # Handling non-serializable objects (like tensors)
-                # If it's a tensor, convert to list
-                if hasattr(json, "tolist"):
-                    data_to_save = json.tolist()
-                elif hasattr(json, "cpu"):
-                     data_to_save = json.cpu().numpy().tolist()
-                else:
-                    data_to_save = json
-                
+                data_to_save = to_json_serializable(json)
                 json_module.dump(data_to_save, f, indent=2)
                 print(f"Data saved to: {file_path}")
                 
