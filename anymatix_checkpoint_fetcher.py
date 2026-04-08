@@ -606,9 +606,10 @@ class AnymatixCheckpointFetcher:
         pbar.update_absolute(progress, 1000)
 
         def callback(x, y):
-            import math
+            if y is None or y <= 0:
+                return
 
-            new_progress = round(1000 * x / y)
+            new_progress = min(1000, round(1000 * x / y))
             nonlocal progress
             if new_progress != progress:
                 progress = new_progress
@@ -777,9 +778,10 @@ class AnymatixFetcher:
                                 pass
 
             def callback(x, y):
-                import math
+                if y is None or y <= 0:
+                    return
 
-                new_progress = round(1000 * x / y)
+                new_progress = min(1000, round(1000 * x / y))
                 nonlocal progress
                 if new_progress != progress:
                     progress = new_progress

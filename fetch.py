@@ -644,21 +644,34 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
         # Try async method first (fastest) if available
         if AIOHTTP_AVAILABLE and AIOFILES_AVAILABLE:
             print(f"[ANYMATIX DOWNLOAD] Using async parallel download strategy")
+
             async def run_async():
                 downloader = AsyncParallelDownloader(url, file_path, total_size, callback, max_connections)
                 success = await downloader.download_async()
                 if not success:
                     raise Exception(f"Async parallel download failed for {url}")
                 return success
-            
-            # Run async download
+
+            # Run async download.
+            # If an event loop is already running in this thread, use a dedicated loop
+            # to avoid `run_until_complete` failures and leaked coroutine warnings.
+            created_loop = False
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                
-            return loop.run_until_complete(run_async())
+                created_loop = True
+
+            if loop.is_running():
+                loop = asyncio.new_event_loop()
+                created_loop = True
+
+            try:
+                return loop.run_until_complete(run_async())
+            finally:
+                if created_loop:
+                    loop.close()
         else:
             # Fallback to threaded parallel download
             print(f"[ANYMATIX DOWNLOAD] Using threaded parallel download strategy")
@@ -931,7 +944,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                                 pass
                         
                         # Final status message for anymatix terminal
-                        if downloaded_size == data["file_size"]:
+                        if data["file_size"] is not None and downloaded_size == data["file_size"]:
                             mb_final = downloaded_size / (1024 * 1024)
                             print(f"[ANYMATIX DOWNLOAD] Traditional download completed: {mb_final:.0f}MB")
                             
