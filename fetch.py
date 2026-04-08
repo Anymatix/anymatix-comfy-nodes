@@ -83,6 +83,15 @@ def hash_string(input_string):
     return hash_object.hexdigest()
 
 
+def is_valid_json_file(file_path: str) -> bool:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            json.load(f)
+        return True
+    except Exception:
+        return False
+
+
 def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
     """Compute SHA256 hash of a file efficiently."""
     sha256_hash = hashlib.sha256()
@@ -876,6 +885,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             local_file_size = os.path.getsize(file_path)
             if local_file_size == data["file_size"]:
                 return file_path
+        elif data["file_size"] is None and os.path.exists(file_path) and file_path.lower().endswith(".json"):
+            if is_valid_json_file(file_path):
+                return file_path
+            print(f"[ANYMATIX DOWNLOAD] Removing malformed cached JSON before re-download: {file_path}")
+            os.remove(file_path)
 
         downloaded_size = local_file_size
 
@@ -908,7 +922,8 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             print(f"[ANYMATIX DOWNLOAD] Using traditional download for {data['file_name']}")
             traditional_exception = None
             try:
-                with open(file_path, 'ab') as file:
+                file_mode = 'ab' if local_file_size > 0 else 'wb'
+                with open(file_path, file_mode) as file:
                     progress_bar = None
                     if TQDM_AVAILABLE and data["file_size"]:
                         try:
@@ -981,6 +996,16 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     f"expected {data['file_size']} bytes, got {actual_size} bytes. "
                     f"The download may have been interrupted or corrupted."
                 )
+
+        if file_path.lower().endswith(".json") and not is_valid_json_file(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+            raise Exception(
+                f"Downloaded JSON file is malformed for {data['file_name']}. "
+                f"The corrupted file was removed and will be re-downloaded on the next run."
+            )
 
         # POST-DOWNLOAD DEDUPLICATION
         print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")

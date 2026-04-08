@@ -882,6 +882,14 @@ class AnymatixFetcher:
             if not os.path.exists(file_path):
                 print(f"[ANYMATIX IS_CHANGED] Model file missing, forcing re-download: {file_path}")
                 return float("NaN")
+
+            if file_path.lower().endswith(".json"):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        json.load(f)
+                except Exception as e:
+                    print(f"[ANYMATIX IS_CHANGED] Cached JSON is invalid, forcing re-download: {file_path} ({e})")
+                    return float("NaN")
             
             # File exists, return hash for stable caching
             return url_hash
