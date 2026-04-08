@@ -14,6 +14,7 @@ from typing import Dict, Any, Tuple
 from comfy_execution.utils import get_executing_context
 from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
 from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAELoader
+import shutil
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
@@ -676,6 +677,7 @@ dirmap = {
     "clip_vision": "clip_vision",
     "audio_encoder": "audio_encoders",
     "sam2": "sam2",
+    "zoedepth": "zoedepth",
     "SEEDVR2_model": "SEEDVR2",
     "SEEDVR2_vae_model": "SEEDVR2",
 }
@@ -1009,6 +1011,114 @@ class AnymatixSAM2Loader:
         }
 
         return (sam2_model,)
+
+
+class AnymatixZoeDepthAnythingPreprocessor:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "config_name": ("STRING",),
+                "model_name": ("STRING",),
+                "preprocessor_config_name": ("STRING",),
+                "environment": (["indoor", "outdoor"], {"default": "indoor"}),
+                "resolution": ("INT", {"default": 512, "min": 64, "max": 16384, "step": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "execute"
+    CATEGORY = "Anymatix"
+    DESCRIPTION = "Loads ZoeDepth from locally fetched Hugging Face files and runs it fully offline"
+
+    def _ensure_local_model_dir(self, config_name: str, model_name: str, preprocessor_config_name: str) -> str:
+        verify_model_file_exists(config_name, "zoedepth config")
+        verify_model_file_exists(model_name, "zoedepth weights")
+        verify_model_file_exists(preprocessor_config_name, "zoedepth preprocessor config")
+
+        expected_names = {
+            config_name: "config.json",
+            model_name: "model.safetensors",
+            preprocessor_config_name: "preprocessor_config.json",
+        }
+
+        source_dirs = {os.path.dirname(path) for path in expected_names}
+        source_basenames = {path: os.path.basename(path) for path in expected_names}
+        if len(source_dirs) == 1 and source_basenames == expected_names:
+            return next(iter(source_dirs))
+
+        model_root = get_anymatix_models_dir("zoedepth")
+        local_dir = os.path.join(model_root, "Intel--zoedepth-nyu-kitti")
+        os.makedirs(local_dir, exist_ok=True)
+
+        for source_path, target_name in expected_names.items():
+            target_path = os.path.join(local_dir, target_name)
+            same_file = False
+            if os.path.exists(target_path):
+                try:
+                    same_file = os.path.samefile(source_path, target_path)
+                except Exception:
+                    same_file = (
+                        os.path.getsize(source_path) == os.path.getsize(target_path)
+                        and int(os.path.getmtime(source_path)) == int(os.path.getmtime(target_path))
+                    )
+            if same_file:
+                continue
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            try:
+                os.link(source_path, target_path)
+            except Exception:
+                shutil.copy2(source_path, target_path)
+
+        return local_dir
+
+    def execute(self, image, config_name, model_name, preprocessor_config_name, environment="indoor", resolution=512):
+        import numpy as np
+        import torch
+        from PIL import Image
+        from transformers import pipeline, AutoImageProcessor, ZoeDepthForDepthEstimation
+        import comfy.model_management as model_management
+
+        del environment
+
+        model_dir = self._ensure_local_model_dir(config_name, model_name, preprocessor_config_name)
+
+        image_processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
+        model = ZoeDepthForDepthEstimation.from_pretrained(model_dir, local_files_only=True)
+        pipe = pipeline(task="depth-estimation", model=model, image_processor=image_processor)
+        pipe.model = pipe.model.to(model_management.get_torch_device())
+
+        input_image = image[0].cpu().numpy()
+        input_image = (input_image * 255.0).clip(0, 255).astype(np.uint8)
+        pil_image = Image.fromarray(input_image)
+
+        with torch.no_grad():
+            result = pipe(pil_image)
+            depth = result["depth"]
+
+        if isinstance(depth, Image.Image):
+            depth_array = np.array(depth, dtype=np.float32)
+        else:
+            depth_array = np.array(depth, dtype=np.float32)
+
+        vmin = np.percentile(depth_array, 2)
+        vmax = np.percentile(depth_array, 85)
+        if vmax > vmin:
+            depth_array = (depth_array - vmin) / (vmax - vmin)
+        else:
+            depth_array = np.zeros_like(depth_array)
+        depth_array = 1.0 - depth_array
+        depth_image = (depth_array * 255.0).clip(0, 255).astype(np.uint8)
+
+        if resolution and resolution > 0:
+            resized = Image.fromarray(depth_image).resize((pil_image.width, pil_image.height), Image.BICUBIC)
+            depth_image = np.array(resized, dtype=np.uint8)
+
+        depth_rgb = np.repeat(depth_image[:, :, None], 3, axis=2).astype(np.float32) / 255.0
+        depth_tensor = torch.from_numpy(depth_rgb)[None,]
+        return (depth_tensor,)
 
 
 if __name__ == "__main__":

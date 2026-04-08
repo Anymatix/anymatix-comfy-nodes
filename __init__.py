@@ -34,6 +34,7 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixLTXAVTextEncoderLoader,
     AnymatixLatentUpscaleModelLoader,
     AnymatixSAM2Loader,
+    AnymatixZoeDepthAnythingPreprocessor,
     AnymatixSeedVR2LoadDiTModel,
     AnymatixSeedVR2LoadVAEModel,
 )
@@ -73,6 +74,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixLTXAVTextEncoderLoader": AnymatixLTXAVTextEncoderLoader,
     "AnymatixLatentUpscaleModelLoader": AnymatixLatentUpscaleModelLoader,
     "AnymatixSAM2Loader": AnymatixSAM2Loader,
+    "AnymatixZoeDepthAnythingPreprocessor": AnymatixZoeDepthAnythingPreprocessor,
     "AnymatixSaveJson": AnymatixSaveJson,
     "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
     "AnymatixSeedVR2LoadDiTModel": AnymatixSeedVR2LoadDiTModel,
@@ -106,6 +108,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixLTXAVTextEncoderLoader": "Anymatix LTX Audio Text Encoder Loader",
     "AnymatixLatentUpscaleModelLoader": "Anymatix Latent Upscale Model Loader",
     "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
+    "AnymatixZoeDepthAnythingPreprocessor": "Anymatix Zoe Depth Anything",
     "AnymatixSaveJson": "Anymatix Save Json",
     "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
     "AnymatixSeedVR2LoadDiTModel": "Anymatix SeedVR2 Load DiT Model",
