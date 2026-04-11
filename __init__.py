@@ -14,7 +14,7 @@ from server import PromptServer
 import app
 
 from .anymatix_checkpoint_fetcher import (
-    AnymatixCheckpointFetcher,
+    # AnymatixCheckpointFetcher,
     AnymatixCheckpointLoader,
     AnymatixFetcher,
     AnymatixLoraLoader,
@@ -30,6 +30,7 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixQuadrupleCLIPLoader,
     AnymatixCLIPLoader2,
     AnymatixAudioEncoderLoader,
+    AnymatixModelPatchLoader,
     AnymatixLTXVAudioVAELoader,
     AnymatixLTXAVTextEncoderLoader,
     AnymatixLatentUpscaleModelLoader,
@@ -48,7 +49,7 @@ from .anymatix_save_json import AnymatixSaveJson
 from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 
 NODE_CLASS_MAPPINGS = {
-    "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
+    # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
     "AnymatixCheckpointLoader": AnymatixCheckpointLoader,
     "AnymatixLoraLoader": AnymatixLoraLoader,
     "AnymatixFetcher": AnymatixFetcher,
@@ -70,6 +71,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixQuadrupleCLIPLoader": AnymatixQuadrupleCLIPLoader,
     "AnymatixCLIPLoader2": AnymatixCLIPLoader2,
     "AnymatixAudioEncoderLoader": AnymatixAudioEncoderLoader,
+    "AnymatixModelPatchLoader": AnymatixModelPatchLoader,
     "AnymatixLTXVAudioVAELoader": AnymatixLTXVAudioVAELoader,
     "AnymatixLTXAVTextEncoderLoader": AnymatixLTXAVTextEncoderLoader,
     "AnymatixLatentUpscaleModelLoader": AnymatixLatentUpscaleModelLoader,
@@ -82,7 +84,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AnymatixCheckpointFetcher": "Anymatix Checkpoint Fetcher",
+    # "AnymatixCheckpointFetcher": "Anymatix Checkpoint Fetcher",
     "AnymatixCheckpointLoader": "Anymatix Checkpoint Loader",
     "AnymatixFetcher": "Anymatix Fetcher",
     "AnymatixLoraLoader": "Anymatix Lora Loader",
@@ -104,6 +106,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixQuadrupleCLIPLoader": "Anymatix Quadruple CLIP Loader",
     "AnymatixCLIPLoader2": "Anymatix CLIP Loader 2",
     "AnymatixAudioEncoderLoader": "Anymatix Audio Encoder Loader",
+    "AnymatixModelPatchLoader": "Anymatix Model Patch Loader",
     "AnymatixLTXVAudioVAELoader": "Anymatix LTXV Audio VAE Loader",
     "AnymatixLTXAVTextEncoderLoader": "Anymatix LTX Audio Text Encoder Loader",
     "AnymatixLatentUpscaleModelLoader": "Anymatix Latent Upscale Model Loader",

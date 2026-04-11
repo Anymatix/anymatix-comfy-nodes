@@ -14,6 +14,7 @@ from typing import Dict, Any, Tuple
 from comfy_execution.utils import get_executing_context
 from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
 from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAELoader
+from comfy_extras.nodes_model_patch import ModelPatchLoader
 import shutil
 
 try:
@@ -361,6 +362,17 @@ class AnymatixAudioEncoderLoader:
             raise RuntimeError("ERROR: audio encoder file is invalid")
         return (audio_encoder,)
 
+class AnymatixModelPatchLoader(ModelPatchLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "name": ("STRING", ),
+                             }}
+
+    CATEGORY = "Anymatix"
+
+    def load_model_patch(self, name):
+        return super().load_model_patch(os.path.basename(name))
+
 class AnymatixLTXVAudioVAELoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -599,6 +611,7 @@ class AnymatixCheckpointFetcher:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
+    DEPRECATED = True
 
     def download_model(self, url, auth=None):
         pbar = comfy.utils.ProgressBar(1000)
