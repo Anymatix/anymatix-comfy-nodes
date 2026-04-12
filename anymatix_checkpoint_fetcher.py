@@ -28,7 +28,7 @@ except Exception:
         # Provide a helpful error when import truly fails
         raise
 from spandrel import ModelLoader, ImageModelDescriptor
-from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader
+from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader, ControlNetLoader
 
 # Try to load GGUF nodes module explicitly from the sibling ComfyUI-GGUF package
 import importlib.util
@@ -268,6 +268,16 @@ class AnymatixVAELoader(VAELoader):
     
     def load_vae(self, vae_name):
         return super().load_vae(os.path.basename(vae_name))
+
+class AnymatixControlNetLoader(ControlNetLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "control_net_name": ("STRING", ),}}
+
+    CATEGORY = "Anymatix"
+
+    def load_controlnet(self, control_net_name):
+        return super().load_controlnet(os.path.basename(control_net_name))
 
 class AnymatixCLIPLoader(CLIPLoader):
     @classmethod
