@@ -48,6 +48,7 @@ from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
 from .anymatix_save_audio import AnymatixSaveAudio
 from .anymatix_save_json import AnymatixSaveJson
 from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
+from .anymatix_clipseg import AnymatixCLIPSeg
 
 NODE_CLASS_MAPPINGS = {
     # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -81,6 +82,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixZoeDepthAnythingPreprocessor": AnymatixZoeDepthAnythingPreprocessor,
     "AnymatixSaveJson": AnymatixSaveJson,
     "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
+    "AnymatixCLIPSeg": AnymatixCLIPSeg,
     "AnymatixSeedVR2LoadDiTModel": AnymatixSeedVR2LoadDiTModel,
     "AnymatixSeedVR2LoadVAEModel": AnymatixSeedVR2LoadVAEModel,
 }
@@ -117,6 +119,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixZoeDepthAnythingPreprocessor": "Anymatix Zoe Depth Anything",
     "AnymatixSaveJson": "Anymatix Save Json",
     "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
+    "AnymatixCLIPSeg": "Anymatix CLIPSeg",
     "AnymatixSeedVR2LoadDiTModel": "Anymatix SeedVR2 Load DiT Model",
     "AnymatixSeedVR2LoadVAEModel": "Anymatix SeedVR2 Load VAE Model",
 }
