@@ -10,7 +10,7 @@ import comfy.utils
 import folder_paths
 import sys
 from comfy_api.latest import io
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from comfy_execution.utils import get_executing_context
 from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
 from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAELoader
@@ -729,6 +729,55 @@ def expand_info(url):
     return None
 
 
+SHA256_URI_PREFIX = "sha256://"
+
+
+def _parse_sha256_uri(uri: str) -> Optional[str]:
+    if not isinstance(uri, str) or not uri.startswith(SHA256_URI_PREFIX):
+        return None
+    hash_part = uri[len(SHA256_URI_PREFIX) :].strip()
+    if len(hash_part) != 64:
+        return None
+    try:
+        int(hash_part, 16)
+    except ValueError:
+        return None
+    return hash_part.lower()
+
+
+def _find_sha256_model_file_in_dir(dir_path: str, sha256_hex: str) -> Optional[str]:
+    if not sha256_hex or not os.path.isdir(dir_path):
+        return None
+    try:
+        for name in os.listdir(dir_path):
+            if name.endswith(".json"):
+                continue
+            base, ext = os.path.splitext(name)
+            if ext.lower() not in (".safetensors", ".ckpt", ".pt", ".pth", ".pt2", ".bin", ".onnx", ".gguf", ".pkl", ".sft"):
+                continue
+            if base.lower() == sha256_hex.lower():
+                full = os.path.join(dir_path, name)
+                if os.path.isfile(full):
+                    return full
+    except OSError:
+        return None
+    return None
+
+
+def _find_sha256_model_file_for_folder_type(type_folder: str, sha256_hex: str) -> Optional[str]:
+    if not sha256_hex:
+        return None
+    try:
+        paths = folder_paths.get_folder_paths(type_folder)
+    except Exception:
+        paths = []
+    for dir_path in paths:
+        found = _find_sha256_model_file_in_dir(dir_path, sha256_hex)
+        if found:
+            return found
+    return None
+
+
 class AnymatixFetcher:
     @classmethod
     def INPUT_TYPES(cls):
@@ -759,6 +808,18 @@ class AnymatixFetcher:
 
             base_url = url.get("url")
             auth = url.get("auth")
+
+            sha256_hex = _parse_sha256_uri(base_url or "")
+            if sha256_hex:
+                type_folder = dirmap[url["type"]]
+                candidate = _find_sha256_model_file_for_folder_type(type_folder, sha256_hex)
+                if candidate:
+                    print(f"[ANYMATIX] Resolved sha256:// to local user model: {candidate}")
+                    return (candidate,)
+                raise FileNotFoundError(
+                    f"No model file found for {base_url} under folder_paths[{type_folder}]. "
+                    "Import the file via Anymatix (Add Model) or add the hash-named file under assets/models."
+                )
 
             # PRE-DOWNLOAD DEDUPLICATION CHECK
             info = expand_info(base_url)
@@ -872,8 +933,16 @@ class AnymatixFetcher:
         """
         if url["type"] not in dirmap:
             return float("NaN")
-        
+
         base_url = url.get("url")
+        sha256_hex = _parse_sha256_uri(base_url or "")
+        if sha256_hex:
+            type_folder = dirmap[url["type"]]
+            candidate = _find_sha256_model_file_for_folder_type(type_folder, sha256_hex)
+            if candidate and os.path.exists(candidate):
+                return hash_string(base_url or "")
+            return float("NaN")
+
         auth = url.get("auth")
         if auth is not None and len(auth) > 0:
             p = urlparse(base_url)
