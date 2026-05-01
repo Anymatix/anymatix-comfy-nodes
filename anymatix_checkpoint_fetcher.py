@@ -691,6 +691,7 @@ class AnymatixCheckpointFetcher:
 dirmap = {
     "checkpoint": "checkpoints",
     "lora": "loras",
+    "model_patch": "model_patches",
     "controlnet": "controlnet",
     "upscale": "upscale_models",
     "latent_upscale": "latent_upscale_models",
