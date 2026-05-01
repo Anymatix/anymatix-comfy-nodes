@@ -193,10 +193,29 @@ async def serve_heartbeat(request):
         return web.json_response({"status": "error", "error": str(e)}, status=500)
 
 
+@routes.get("/anymatix/hashedModelAssetExists")
+async def hashed_model_asset_exists(request):
+    hash_value = request.rel_url.query.get("hash") or ""
+    folder_paths_key = request.rel_url.query.get("folder_paths_key") or ""
+    ext = request.rel_url.query.get("extension") or ""
+    if not hash_value or not folder_paths_key or not ext:
+        return web.Response(status=400, text="missing hash, folder_paths_key, or extension")
+    try:
+        dirs = folder_paths.get_folder_paths(folder_paths_key)
+    except KeyError:
+        return web.json_response({"exists": False})
+    for d in dirs:
+        fp = os.path.join(d, f"{hash_value}.{ext}")
+        if os.path.isfile(fp):
+            return web.json_response({"exists": True})
+    return web.json_response({"exists": False})
+
+
 @routes.post("/anymatix/uploadAsset")
 async def upload_asset(request):
     """
-    Upload an asset file to the ComfyUI input directory.
+    Upload an asset file to the ComfyUI input directory (default), or under a
+    folder_paths model root when multipart field folder_paths_key is set.
     Uses atomic writes and hash verification to prevent incomplete uploads.
     Supports resumable uploads for large files.
     """
@@ -204,6 +223,7 @@ async def upload_asset(request):
 
     hash_value = None
     file_extension = None
+    folder_paths_key = None
     temp_path = None
     resume_offset = 0
 
@@ -214,6 +234,8 @@ async def upload_asset(request):
                 hash_value = await part.text()
             elif part.name == "extension":
                 file_extension = await part.text()
+            elif part.name == "folder_paths_key":
+                folder_paths_key = (await part.text()).strip() or None
             elif part.name == "resume":
                 # Client requests to resume from previous upload
                 resume_requested = await part.text()
@@ -221,11 +243,21 @@ async def upload_asset(request):
             elif part.name == "file":
                 if not hash_value or not file_extension:
                     return web.Response(status=400, text="Hash and extension must be provided before file")
-                
-                # Final destination path
-                file_path = os.path.join(
-                    folder_paths.input_directory, f"{hash_value}.{file_extension}"
-                )
+
+                if folder_paths_key:
+                    try:
+                        dest_dirs = folder_paths.get_folder_paths(folder_paths_key)
+                    except KeyError:
+                        return web.Response(status=400, text=f"Unknown folder_paths key: {folder_paths_key}")
+                    if not dest_dirs:
+                        return web.Response(status=400, text=f"No paths for folder_paths key: {folder_paths_key}")
+                    dest_dir = dest_dirs[0]
+                    os.makedirs(dest_dir, exist_ok=True)
+                    file_path = os.path.join(dest_dir, f"{hash_value}.{file_extension}")
+                else:
+                    file_path = os.path.join(
+                        folder_paths.input_directory, f"{hash_value}.{file_extension}"
+                    )
                 
                 # Write to temporary file first (atomic write pattern)
                 # Use same .tmp convention as downloads (fetch.py uses .segment_N for parallel, .tmp for temp)
