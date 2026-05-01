@@ -737,7 +737,7 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
     ]
     for pack_file in pack_files:
         file_url = f"{base_url}/resolve/main/{pack_file}"
-        download_file(
+        downloaded_path = download_file(
             url=file_url,
             dir=pack_dir,
             callback=callback,
@@ -745,6 +745,17 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
             effective_url=file_url,
             redact_append=auth if auth is not None and len(str(auth)) > 0 else None,
         )
+        # download_file persists hash-suffixed filenames; Chatterbox expects canonical names.
+        target_path = os.path.join(pack_dir, pack_file)
+        if os.path.abspath(downloaded_path) != os.path.abspath(target_path):
+            try:
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                os.link(downloaded_path, target_path)
+            except Exception:
+                shutil.copy2(downloaded_path, target_path)
+        if not os.path.isfile(target_path):
+            raise FileNotFoundError(f"Chatterbox pack file missing after download: {target_path}")
     print("[ANYMATIX] fetched Chatterbox model pack resembleai_default_voice")
     return ("resembleai_default_voice",)
 
