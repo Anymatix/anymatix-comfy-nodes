@@ -704,7 +704,48 @@ dirmap = {
     "zoedepth": "zoedepth",
     "SEEDVR2_model": "SEEDVR2",
     "SEEDVR2_vae_model": "SEEDVR2",
+    # Virtual type: download target is ComfyUI/models/tts/chatterbox/resembleai_default_voice (see download_model)
+    "chatterbox_model_pack": "chatterbox_model_pack",
 }
+
+
+def _chatterbox_pack_dir() -> str:
+    """Same layout as ComfyUI-Chatterbox: models/tts/chatterbox/<pack_name> under Comfy root."""
+    custom_nodes_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    comfy_root = os.path.abspath(os.path.join(custom_nodes_root, ".."))
+    return os.path.join(comfy_root, "models", "tts", "chatterbox", "resembleai_default_voice")
+
+
+def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
+    """
+    Pull ResembleAI/Chatterbox multi-file pack into the path Chatterbox nodes expect.
+    Returns the pack directory name consumed by ChatterboxVC / Chatterbox TTS.
+    """
+    base_url = (url_dict.get("url") or "").rstrip("/")
+    if not base_url:
+        raise ValueError("chatterbox_model_pack fetch requires a non-empty url")
+    auth = url_dict.get("auth")
+    pack_dir = _chatterbox_pack_dir()
+    os.makedirs(pack_dir, exist_ok=True)
+    pack_files = [
+        "ve.safetensors",
+        "t3_cfg.safetensors",
+        "s3gen.safetensors",
+        "tokenizer.json",
+        "conds.pt",
+    ]
+    for pack_file in pack_files:
+        file_url = f"{base_url}/resolve/main/{pack_file}"
+        download_file(
+            url=file_url,
+            dir=pack_dir,
+            callback=callback,
+            expand_info=expand_info,
+            effective_url=file_url,
+            redact_append=auth if auth is not None and len(str(auth)) > 0 else None,
+        )
+    print("[ANYMATIX] fetched Chatterbox model pack resembleai_default_voice")
+    return ("resembleai_default_voice",)
 
 
 def expand_info_civitai(url):
@@ -800,6 +841,22 @@ class AnymatixFetcher:
             print("download model", type(url), safe_preview)
         except Exception:
             pass
+        if url.get("type") == "chatterbox_model_pack":
+            pbar_cb = comfy.utils.ProgressBar(1000)
+            prog = 0
+            pbar_cb.update_absolute(prog, 1000)
+
+            def callback(x, y):
+                if y is None or y <= 0:
+                    return
+                new_progress = min(1000, round(1000 * x / y))
+                nonlocal prog
+                if new_progress != prog:
+                    prog = new_progress
+                    pbar_cb.update_absolute(prog, 1000)
+
+            return download_chatterbox_hf_pack(url, callback)
+
         if url["type"] in dirmap:
             dir = get_anymatix_models_dir(dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
@@ -931,6 +988,13 @@ class AnymatixFetcher:
         This prevents ComfyUI from using cached output paths when the actual model
         file has been deleted.
         """
+        if url.get("type") == "chatterbox_model_pack":
+            ve_path = os.path.join(_chatterbox_pack_dir(), "ve.safetensors")
+            if os.path.isfile(ve_path):
+                return hash_string(str(url.get("url") or ""))
+            print(f"[ANYMATIX IS_CHANGED] Chatterbox pack missing {ve_path}, forcing fetch")
+            return float("NaN")
+
         if url["type"] not in dirmap:
             return float("NaN")
 

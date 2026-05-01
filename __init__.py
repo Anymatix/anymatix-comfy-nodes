@@ -49,6 +49,7 @@ from .anymatix_save_audio import AnymatixSaveAudio
 from .anymatix_save_json import AnymatixSaveJson
 from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
+from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
 
 NODE_CLASS_MAPPINGS = {
     # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -85,6 +86,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixCLIPSeg": AnymatixCLIPSeg,
     "AnymatixSeedVR2LoadDiTModel": AnymatixSeedVR2LoadDiTModel,
     "AnymatixSeedVR2LoadVAEModel": AnymatixSeedVR2LoadVAEModel,
+    "AnymatixChatterboxPackFromFetchedName": AnymatixChatterboxPackFromFetchedName,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -122,6 +124,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixCLIPSeg": "Anymatix CLIPSeg",
     "AnymatixSeedVR2LoadDiTModel": "Anymatix SeedVR2 Load DiT Model",
     "AnymatixSeedVR2LoadVAEModel": "Anymatix SeedVR2 Load VAE Model",
+    "AnymatixChatterboxPackFromFetchedName": "Anymatix Chatterbox pack (from fetcher)",
 }
 
 
