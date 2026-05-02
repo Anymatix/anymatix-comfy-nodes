@@ -8,10 +8,12 @@ Portable CPU / GPU compute % for GET /anymatix/host_compute_metrics.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 
@@ -37,8 +39,23 @@ def _sample_cpu_percent() -> int | None:
     try:
         import psutil
 
-        v = int(psutil.cpu_percent(interval=0.2))
+        psutil.cpu_percent(interval=None)
+        time.sleep(0.05)
+        v = int(psutil.cpu_percent(interval=0.25))
         return _clamp_pct(v)
+    except Exception:
+        pass
+    return _sample_cpu_percent_loadavg()
+
+
+def _sample_cpu_percent_loadavg() -> int | None:
+    if sys.platform == "win32":
+        return None
+    try:
+        load1, _, _ = os.getloadavg()
+        n = os.cpu_count() or 1
+        pct = int(min(100, round(100.0 * load1 / max(n, 1))))
+        return _clamp_pct(pct)
     except Exception:
         return None
 
