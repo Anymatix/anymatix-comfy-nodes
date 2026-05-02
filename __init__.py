@@ -50,6 +50,7 @@ from .anymatix_save_json import AnymatixSaveJson
 from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
 from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
+from .host_compute_metrics import sample_host_compute_metrics
 
 NODE_CLASS_MAPPINGS = {
     # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -163,6 +164,17 @@ async def _heartbeat_timer(timeout_seconds: int):
 @routes.get("/anymatix/log")
 async def get_log(request):
     return web.json_response(list(app.logger.get_logs()))
+
+
+@routes.get("/anymatix/host_compute_metrics")
+async def anymatix_host_compute_metrics(_request):
+    """CPU/GPU compute utilization sampled on the Comfy host (same machine as inference)."""
+    try:
+        data = await asyncio.to_thread(sample_host_compute_metrics)
+        return web.json_response(data)
+    except Exception as e:
+        print(f"anymatix: host_compute_metrics error: {e}")
+        return web.json_response({"cpu": None, "gpu": None}, status=500)
 
 
 @routes.post('/anymatix/heartbeat')
