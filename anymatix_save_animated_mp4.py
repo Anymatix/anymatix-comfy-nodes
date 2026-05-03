@@ -213,6 +213,10 @@ class AnymatixSaveAnimatedMP4:
             filename = filename_prefix
         
         file_path = os.path.join(full_output_path, filename)
+        temp_file_path = os.path.join(
+            full_output_path,
+            f".{filename}.tmp-{os.getpid()}.mp4"
+        )
         
         # Get frame dimensions from first image
         height, width = images[0].shape[:2]
@@ -310,7 +314,13 @@ class AnymatixSaveAnimatedMP4:
                 if encoder_candidate['name'] == preset['codec'] and 'preset' in preset:
                     ffmpeg_cmd.extend(['-preset', preset['preset']])
 
-                ffmpeg_cmd.append(file_path)
+                try:
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                except OSError:
+                    pass
+
+                ffmpeg_cmd.append(temp_file_path)
 
                 print(f"Starting FFmpeg pipe encoding with {encoder_candidate['name']}...")
 
@@ -339,6 +349,11 @@ class AnymatixSaveAnimatedMP4:
                         process.kill()
                     except Exception:
                         pass
+                    try:
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                    except OSError:
+                        pass
                     print(f"Encoder {encoder_candidate['name']} failed: {encoder_error}")
                     continue
 
@@ -347,6 +362,11 @@ class AnymatixSaveAnimatedMP4:
                     break
 
                 last_error = RuntimeError(stderr.decode())
+                try:
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                except OSError:
+                    pass
                 print(f"Encoder {encoder_candidate['name']} failed, trying fallback...")
             else:
                 if temp_dir is not None:
@@ -361,12 +381,22 @@ class AnymatixSaveAnimatedMP4:
             if temp_dir is not None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             
-            # Verify output and ensure file is fully synced to disk
-            # Without fsync, the UI may try to fetch the file before it's fully written
-            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                # Force sync to disk so file is available immediately
-                with open(file_path, 'r+b') as f:
+            # Publish atomically: the final URL must not exist until FFmpeg has
+            # closed and synced a complete MP4.
+            if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
+                with open(temp_file_path, 'r+b') as f:
                     os.fsync(f.fileno())
+
+                os.replace(temp_file_path, file_path)
+
+                try:
+                    dir_fd = os.open(full_output_path, os.O_DIRECTORY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except Exception:
+                    pass
                 
                 file_size = os.path.getsize(file_path)
                 duration = total_frames / fps
