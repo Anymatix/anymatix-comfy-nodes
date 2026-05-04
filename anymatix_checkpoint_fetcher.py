@@ -709,6 +709,48 @@ dirmap = {
     "chatterbox_model_pack": "chatterbox_model_pack",
 }
 
+_DWPOSE_AUX_HF_RE = re.compile(
+    r"^https://huggingface\.co/([^/]+)/([^/]+)/resolve/main/([^?#]+)"
+)
+
+
+def _ensure_aux_annotator_ckpts_dir() -> str:
+    """Layout expected by comfyui_controlnet_aux custom_hf_download (AUX_ANNOTATOR_CKPTS_PATH)."""
+    d = os.path.join(folder_paths.models_dir, "annotator_ckpts")
+    os.makedirs(d, exist_ok=True)
+    os.environ.setdefault("AUX_ANNOTATOR_CKPTS_PATH", d)
+    return d
+
+
+def _destination_path_for_dwpose_aux_url(base_url: str, root: str) -> str:
+    m = _DWPOSE_AUX_HF_RE.match((base_url or "").strip())
+    if not m:
+        raise ValueError(
+            "dwpose_aux URL must look like "
+            "https://huggingface.co/<org>/<repo>/resolve/main/<filename>"
+        )
+    org, repo, fn = m.group(1), m.group(2), m.group(3)
+    return os.path.join(root, org, repo, fn)
+
+
+def _stream_download_url_to_path(url: str, dest_path: str, progress_callback) -> None:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp_path = dest_path + ".part"
+    with requests.get(url, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length") or 0)
+        done = 0
+        with open(tmp_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress_callback is not None and total > 0:
+                        progress_callback(done, total)
+        if progress_callback is not None and total > 0 and done < total:
+            progress_callback(total, total)
+    os.replace(tmp_path, dest_path)
+
 
 def _chatterbox_pack_dir() -> str:
     """Same layout as ComfyUI-Chatterbox: models/tts/chatterbox/<pack_name> under Comfy root."""
@@ -869,6 +911,36 @@ class AnymatixFetcher:
 
             return download_chatterbox_hf_pack(url, callback)
 
+        if url.get("type") == "dwpose_aux":
+            root = _ensure_aux_annotator_ckpts_dir()
+            base_url = (url.get("url") or "").strip()
+            auth = url.get("auth")
+            if auth is not None and len(str(auth)) > 0:
+                p = urlparse(base_url)
+                existing = parse_qsl(p.query, keep_blank_values=True)
+                to_add = parse_qsl(str(auth), keep_blank_values=True)
+                effective = urlunparse(p._replace(query=urlencode(existing + to_add)))
+            else:
+                effective = base_url
+
+            dest = _destination_path_for_dwpose_aux_url(effective, root)
+            pbar = comfy.utils.ProgressBar(1000)
+            prog_holder = [0]
+
+            def callback(x, y):
+                if y is None or y <= 0:
+                    return
+                new_p = min(1000, round(1000 * x / y))
+                if new_p != prog_holder[0]:
+                    prog_holder[0] = new_p
+                    pbar.update_absolute(new_p, 1000)
+
+            if os.path.isfile(dest):
+                return (dest,)
+            print(f"[ANYMATIX] fetching DWPose aux weight to {dest}")
+            _stream_download_url_to_path(effective, dest, callback)
+            return (dest,)
+
         if url["type"] in dirmap:
             dir = get_anymatix_models_dir(dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
@@ -1005,6 +1077,25 @@ class AnymatixFetcher:
             if os.path.isfile(ve_path):
                 return hash_string(str(url.get("url") or ""))
             print(f"[ANYMATIX IS_CHANGED] Chatterbox pack missing {ve_path}, forcing fetch")
+            return float("NaN")
+
+        if url.get("type") == "dwpose_aux":
+            try:
+                root = _ensure_aux_annotator_ckpts_dir()
+                base_url = (url.get("url") or "").strip()
+                auth = url.get("auth")
+                if auth is not None and len(str(auth)) > 0:
+                    p = urlparse(base_url)
+                    existing = parse_qsl(p.query, keep_blank_values=True)
+                    to_add = parse_qsl(str(auth), keep_blank_values=True)
+                    effective = urlunparse(p._replace(query=urlencode(existing + to_add)))
+                else:
+                    effective = base_url
+                dest = _destination_path_for_dwpose_aux_url(effective, root)
+                if os.path.isfile(dest):
+                    return hash_string(effective)
+            except Exception:
+                pass
             return float("NaN")
 
         if url["type"] not in dirmap:
@@ -1189,6 +1280,133 @@ class AnymatixSAM2Loader:
         }
 
         return (sam2_model,)
+
+
+DWPOSE_MODEL_NAME = "yzd-v/DWPose"
+
+
+class AnymatixDWPreprocessor:
+    """
+    DWPose with weights provisioned by AnymatixFetcher (HTTP) into AUX_ANNOTATOR_CKPTS_PATH
+    so comfyui_controlnet_aux never calls huggingface_hub while HF_HUB_OFFLINE=1.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "bbox_detector": ("STRING", {"default": ""}),
+                "pose_estimator": ("STRING", {"default": ""}),
+                "detect_hand": (["enable", "disable"], {"default": "enable"}),
+                "detect_body": (["enable", "disable"], {"default": "enable"}),
+                "detect_face": (["enable", "disable"], {"default": "enable"}),
+                "resolution": ("INT", {"default": 512, "min": 64, "max": 16384, "step": 64}),
+                "scale_stick_for_xinsr_cn": (["disable", "enable"], {"default": "disable"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "POSE_KEYPOINT")
+    FUNCTION = "estimate_pose"
+    CATEGORY = "ControlNet Preprocessors/Faces and Poses Estimators"
+
+    def estimate_pose(
+        self,
+        image,
+        bbox_detector,
+        pose_estimator,
+        detect_hand="enable",
+        detect_body="enable",
+        detect_face="enable",
+        resolution=512,
+        scale_stick_for_xinsr_cn="disable",
+    ):
+        import comfy.model_management as model_management
+        import importlib.util
+
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _aux_root = os.path.abspath(os.path.join(_here, "..", "comfyui_controlnet_aux"))
+        _utils_path = os.path.join(_aux_root, "utils.py")
+        _src_root = os.path.join(_aux_root, "src")
+        if not os.path.isfile(_utils_path) or not os.path.isdir(_src_root):
+            raise RuntimeError(
+                "AnymatixDWPreprocessor requires comfyui_controlnet_aux next to anymatix-comfy-nodes."
+            )
+        if _src_root not in sys.path:
+            sys.path.insert(0, _src_root)
+        spec_u = importlib.util.spec_from_file_location("cn_aux_utils_dyn", _utils_path)
+        if spec_u is None or spec_u.loader is None:
+            raise RuntimeError("Failed to load comfyui_controlnet_aux utils.py")
+        aux_utils = importlib.util.module_from_spec(spec_u)
+        spec_u.loader.exec_module(aux_utils)
+        common_annotator_call = aux_utils.common_annotator_call
+        from custom_controlnet_aux.dwpose import DwposeDetector
+
+        bd = (bbox_detector or "").strip()
+        pe = (pose_estimator or "").strip()
+        if not bd or not pe or not os.path.isfile(bd) or not os.path.isfile(pe):
+            raise FileNotFoundError(
+                "DWPose weights missing. Run fetchers first (offline-safe). "
+                f"bbox_detector={bd!r} pose_estimator={pe!r}"
+            )
+
+        bbox_key = os.path.basename(bd)
+        pose_key = os.path.basename(pe)
+
+        if bbox_key == "None":
+            yolo_repo = DWPOSE_MODEL_NAME
+        elif bbox_key == "yolox_l.onnx":
+            yolo_repo = DWPOSE_MODEL_NAME
+        elif "yolox" in bbox_key:
+            yolo_repo = "hr16/yolox-onnx"
+        elif "yolo_nas" in bbox_key:
+            yolo_repo = "hr16/yolo-nas-fp16"
+        else:
+            raise NotImplementedError(f"Unsupported bbox detector file: {bbox_key}")
+
+        if pose_key == "dw-ll_ucoco_384.onnx":
+            pose_repo = DWPOSE_MODEL_NAME
+        elif pose_key.endswith(".onnx"):
+            pose_repo = "hr16/UnJIT-DWPose"
+        elif pose_key.endswith(".torchscript.pt"):
+            pose_repo = "hr16/DWPose-TorchScript-BatchSize5"
+        else:
+            raise NotImplementedError(f"Unsupported pose estimator file: {pose_key}")
+
+        model = DwposeDetector.from_pretrained(
+            pose_repo,
+            yolo_repo,
+            det_filename=(None if bbox_key == "None" else bbox_key),
+            pose_filename=pose_key,
+            torchscript_device=model_management.get_torch_device(),
+        )
+
+        detect_hand = detect_hand == "enable"
+        detect_body = detect_body == "enable"
+        detect_face = detect_face == "enable"
+        scale_stick_for_xinsr_cn = scale_stick_for_xinsr_cn == "enable"
+        self.openpose_dicts = []
+
+        def func(img, **kwargs):
+            pose_img, openpose_dict = model(img, **kwargs)
+            self.openpose_dicts.append(openpose_dict)
+            return pose_img
+
+        out = common_annotator_call(
+            func,
+            image,
+            include_hand=detect_hand,
+            include_face=detect_face,
+            include_body=detect_body,
+            image_and_json=True,
+            resolution=resolution,
+            xinsr_stick_scaling=scale_stick_for_xinsr_cn,
+        )
+        del model
+        return {
+            "ui": {"openpose_json": [json.dumps(self.openpose_dicts, indent=4)]},
+            "result": (out, self.openpose_dicts),
+        }
 
 
 class AnymatixZoeDepthAnythingPreprocessor:
