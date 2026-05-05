@@ -716,9 +716,13 @@ _DWPOSE_AUX_HF_RE = re.compile(
 
 def _ensure_aux_annotator_ckpts_dir() -> str:
     """Layout expected by comfyui_controlnet_aux custom_hf_download (AUX_ANNOTATOR_CKPTS_PATH)."""
+    configured = (os.environ.get("AUX_ANNOTATOR_CKPTS_PATH") or "").strip()
+    if configured:
+        os.makedirs(configured, exist_ok=True)
+        return configured
     d = os.path.join(folder_paths.models_dir, "annotator_ckpts")
     os.makedirs(d, exist_ok=True)
-    os.environ.setdefault("AUX_ANNOTATOR_CKPTS_PATH", d)
+    os.environ["AUX_ANNOTATOR_CKPTS_PATH"] = d
     return d
 
 
