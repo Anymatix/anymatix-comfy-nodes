@@ -1351,23 +1351,17 @@ class AnymatixDWPreprocessor:
 
         def resolve_aux_ckpt_path(value: str) -> str:
             """
-            Accept either an absolute fetched path or a fetched filename.
-            Fetcher-connected widget args often carry just the filename; resolve
-            against comfyui_controlnet_aux ckpt root in that case.
+            Contract: input is a model filename coming from AnymatixFetcher.
+            Resolve strictly under AUX_ANNOTATOR_CKPTS_PATH.
             """
-            candidate = (value or "").strip()
-            if not candidate:
+            raw = (value or "").strip()
+            if not raw:
                 return ""
-            if os.path.isfile(candidate):
-                return candidate
-
+            filename = os.path.basename(raw)
             ckpt_root = os.environ.get("AUX_ANNOTATOR_CKPTS_PATH", "").strip()
-            if ckpt_root:
-                joined = os.path.join(ckpt_root, candidate)
-                if os.path.isfile(joined):
-                    return joined
-
-            return candidate
+            if not ckpt_root:
+                return filename
+            return os.path.join(ckpt_root, filename)
 
         bd = resolve_aux_ckpt_path(bbox_detector)
         pe = resolve_aux_ckpt_path(pose_estimator)
