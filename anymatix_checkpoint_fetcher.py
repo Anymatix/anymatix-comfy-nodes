@@ -729,8 +729,36 @@ def _destination_path_for_dwpose_aux_url(base_url: str, root: str) -> str:
             "dwpose_aux URL must look like "
             "https://huggingface.co/<org>/<repo>/resolve/main/<filename>"
         )
+    fn = m.group(3)
+    # Runtime contract: DWPose node consumes plain filenames and resolves them
+    # under AUX_ANNOTATOR_CKPTS_PATH (flat layout).
+    return os.path.join(root, fn)
+
+
+def _legacy_destination_path_for_dwpose_aux_url(base_url: str, root: str) -> str:
+    m = _DWPOSE_AUX_HF_RE.match((base_url or "").strip())
+    if not m:
+        raise ValueError(
+            "dwpose_aux URL must look like "
+            "https://huggingface.co/<org>/<repo>/resolve/main/<filename>"
+        )
     org, repo, fn = m.group(1), m.group(2), m.group(3)
     return os.path.join(root, org, repo, fn)
+
+
+def _promote_legacy_dwpose_file_if_needed(base_url: str, root: str, canonical_dest: str) -> bool:
+    """Migrate old nested dwpose_aux cache entry to canonical flat ckpts layout."""
+    if os.path.isfile(canonical_dest):
+        return True
+    legacy_dest = _legacy_destination_path_for_dwpose_aux_url(base_url, root)
+    if not os.path.isfile(legacy_dest):
+        return False
+    os.makedirs(os.path.dirname(canonical_dest), exist_ok=True)
+    try:
+        os.link(legacy_dest, canonical_dest)
+    except Exception:
+        shutil.copy2(legacy_dest, canonical_dest)
+    return os.path.isfile(canonical_dest)
 
 
 def _stream_download_url_to_path(url: str, dest_path: str, progress_callback) -> None:
@@ -935,11 +963,13 @@ class AnymatixFetcher:
                     prog_holder[0] = new_p
                     pbar.update_absolute(new_p, 1000)
 
+            if not os.path.isfile(dest):
+                _promote_legacy_dwpose_file_if_needed(effective, root, dest)
             if os.path.isfile(dest):
-                return (dest,)
+                return (os.path.basename(dest),)
             print(f"[ANYMATIX] fetching DWPose aux weight to {dest}")
             _stream_download_url_to_path(effective, dest, callback)
-            return (dest,)
+            return (os.path.basename(dest),)
 
         if url["type"] in dirmap:
             dir = get_anymatix_models_dir(dirmap[url["type"]])
@@ -1092,6 +1122,8 @@ class AnymatixFetcher:
                 else:
                     effective = base_url
                 dest = _destination_path_for_dwpose_aux_url(effective, root)
+                if not os.path.isfile(dest):
+                    _promote_legacy_dwpose_file_if_needed(effective, root, dest)
                 if os.path.isfile(dest):
                     return hash_string(effective)
             except Exception:
