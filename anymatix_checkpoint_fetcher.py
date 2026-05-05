@@ -1359,16 +1359,29 @@ class AnymatixDWPreprocessor:
         def resolve_aux_ckpt_path(value: str) -> str:
             """
             Contract: input is a model filename coming from AnymatixFetcher.
-            Resolve strictly under AUX_ANNOTATOR_CKPTS_PATH.
+            Resolve under AUX_ANNOTATOR_CKPTS_PATH, while tolerating already-resolved
+            absolute paths from older graph wiring.
             """
             raw = (value or "").strip()
             if not raw:
                 return ""
+            if os.path.isabs(raw) and os.path.isfile(raw):
+                return raw
             filename = os.path.basename(raw)
             ckpt_root = os.environ.get("AUX_ANNOTATOR_CKPTS_PATH", "").strip()
             if not ckpt_root:
-                return filename
-            return os.path.join(ckpt_root, filename)
+                default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
+                candidate = os.path.join(default_root, filename)
+                return candidate if os.path.isfile(candidate) else filename
+            preferred = os.path.join(ckpt_root, filename)
+            if os.path.isfile(preferred):
+                return preferred
+            # Keep compatibility with installations where prior downloads were written
+            # under the default annotator_ckpts root before AUX_ANNOTATOR_CKPTS_PATH
+            # was honored.
+            default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
+            fallback = os.path.join(default_root, filename)
+            return fallback if os.path.isfile(fallback) else preferred
 
         bd = resolve_aux_ckpt_path(bbox_detector)
         pe = resolve_aux_ckpt_path(pose_estimator)
