@@ -1349,8 +1349,28 @@ class AnymatixDWPreprocessor:
         common_annotator_call = utils_mod.common_annotator_call
         from custom_controlnet_aux.dwpose import DwposeDetector, Wholebody
 
-        bd = (bbox_detector or "").strip()
-        pe = (pose_estimator or "").strip()
+        def resolve_aux_ckpt_path(value: str) -> str:
+            """
+            Accept either an absolute fetched path or a fetched filename.
+            Fetcher-connected widget args often carry just the filename; resolve
+            against comfyui_controlnet_aux ckpt root in that case.
+            """
+            candidate = (value or "").strip()
+            if not candidate:
+                return ""
+            if os.path.isfile(candidate):
+                return candidate
+
+            ckpt_root = os.environ.get("AUX_ANNOTATOR_CKPTS_PATH", "").strip()
+            if ckpt_root:
+                joined = os.path.join(ckpt_root, candidate)
+                if os.path.isfile(joined):
+                    return joined
+
+            return candidate
+
+        bd = resolve_aux_ckpt_path(bbox_detector)
+        pe = resolve_aux_ckpt_path(pose_estimator)
         if not bd or not pe or not os.path.isfile(bd) or not os.path.isfile(pe):
             raise FileNotFoundError(
                 "DWPose weights missing. Run fetchers first (offline-safe). "
