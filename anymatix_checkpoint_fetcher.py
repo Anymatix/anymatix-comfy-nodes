@@ -1322,7 +1322,7 @@ class AnymatixDWPreprocessor:
         scale_stick_for_xinsr_cn="disable",
     ):
         import comfy.model_management as model_management
-        import importlib.util
+        import importlib
 
         _here = os.path.dirname(os.path.abspath(__file__))
         _aux_root = os.path.abspath(os.path.join(_here, "..", "comfyui_controlnet_aux"))
@@ -1332,14 +1332,21 @@ class AnymatixDWPreprocessor:
             raise RuntimeError(
                 "AnymatixDWPreprocessor requires comfyui_controlnet_aux next to anymatix-comfy-nodes."
             )
-        if _src_root not in sys.path:
-            sys.path.insert(0, _src_root)
-        spec_u = importlib.util.spec_from_file_location("cn_aux_utils_dyn", _utils_path)
-        if spec_u is None or spec_u.loader is None:
-            raise RuntimeError("Failed to load comfyui_controlnet_aux utils.py")
-        aux_utils = importlib.util.module_from_spec(spec_u)
-        spec_u.loader.exec_module(aux_utils)
-        common_annotator_call = aux_utils.common_annotator_call
+        _custom_nodes_parent = os.path.dirname(_aux_root)
+        if _custom_nodes_parent not in sys.path:
+            sys.path.insert(0, _custom_nodes_parent)
+        # Load via the real extension package. utils.py uses `from .log import log`;
+        # importing it with exec_module as a standalone top-level module triggers
+        # "attempted relative import with no known parent package".
+        try:
+            importlib.import_module("comfyui_controlnet_aux")
+        except ImportError as e:
+            raise RuntimeError(
+                "AnymatixDWPreprocessor requires comfyui_controlnet_aux as sibling under custom_nodes "
+                f"(import comfyui_controlnet_aux failed: {e})"
+            ) from e
+        utils_mod = importlib.import_module("comfyui_controlnet_aux.utils")
+        common_annotator_call = utils_mod.common_annotator_call
         from custom_controlnet_aux.dwpose import DwposeDetector
 
         bd = (bbox_detector or "").strip()
