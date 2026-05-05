@@ -1347,7 +1347,7 @@ class AnymatixDWPreprocessor:
             ) from e
         utils_mod = importlib.import_module("comfyui_controlnet_aux.utils")
         common_annotator_call = utils_mod.common_annotator_call
-        from custom_controlnet_aux.dwpose import DwposeDetector
+        from custom_controlnet_aux.dwpose import DwposeDetector, Wholebody
 
         bd = (bbox_detector or "").strip()
         pe = (pose_estimator or "").strip()
@@ -1360,32 +1360,22 @@ class AnymatixDWPreprocessor:
         bbox_key = os.path.basename(bd)
         pose_key = os.path.basename(pe)
 
-        if bbox_key == "None":
-            yolo_repo = DWPOSE_MODEL_NAME
-        elif bbox_key == "yolox_l.onnx":
-            yolo_repo = DWPOSE_MODEL_NAME
-        elif "yolox" in bbox_key:
-            yolo_repo = "hr16/yolox-onnx"
-        elif "yolo_nas" in bbox_key:
-            yolo_repo = "hr16/yolo-nas-fp16"
-        else:
+        if bbox_key != "None" and not (
+            bbox_key.endswith(".onnx") or bbox_key.endswith(".torchscript.pt")
+        ):
             raise NotImplementedError(f"Unsupported bbox detector file: {bbox_key}")
-
-        if pose_key == "dw-ll_ucoco_384.onnx":
-            pose_repo = DWPOSE_MODEL_NAME
-        elif pose_key.endswith(".onnx"):
-            pose_repo = "hr16/UnJIT-DWPose"
-        elif pose_key.endswith(".torchscript.pt"):
-            pose_repo = "hr16/DWPose-TorchScript-BatchSize5"
-        else:
+        if not (pose_key.endswith(".onnx") or pose_key.endswith(".torchscript.pt")):
             raise NotImplementedError(f"Unsupported pose estimator file: {pose_key}")
 
-        model = DwposeDetector.from_pretrained(
-            pose_repo,
-            yolo_repo,
-            det_filename=(None if bbox_key == "None" else bbox_key),
-            pose_filename=pose_key,
-            torchscript_device=model_management.get_torch_device(),
+        # Offline-safe path: use fetched local files directly.
+        det_model_path = None if bbox_key == "None" else bd
+        pose_model_path = pe
+        model = DwposeDetector(
+            Wholebody(
+                det_model_path,
+                pose_model_path,
+                torchscript_device=model_management.get_torch_device(),
+            )
         )
 
         detect_hand = detect_hand == "enable"
