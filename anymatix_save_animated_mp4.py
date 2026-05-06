@@ -12,6 +12,7 @@ _DBG = "[ANYMATIX_SAVE_MP4]"
 
 def _save_mp4_dbg(tag: str, detail: str) -> None:
     print(f"{_DBG} {tag} | {detail}")
+    sys.stdout.flush()
 
 # Try to import imageio-ffmpeg for automatic FFmpeg management
 try:
@@ -302,6 +303,25 @@ class AnymatixSaveAnimatedMP4:
             stdout = b""
             stderr = b""
             last_error = None
+            _video_sec = float(total_frames) / fps if fps > 0 else -1.0
+            _audio_sec = None
+            if audio_file_path is not None:
+                import wave
+
+                try:
+                    with wave.open(audio_file_path, "rb") as wf:
+                        _fr = wf.getnframes()
+                        _rate = wf.getframerate()
+                        if _rate > 0:
+                            _audio_sec = float(_fr) / float(_rate)
+                except (OSError, EOFError, wave.Error) as e:
+                    _save_mp4_dbg("MUX_TIMING_WAV_READ", f"err={e!r}")
+            _save_mp4_dbg(
+                "MUX_TIMING",
+                f"frames={total_frames} fps={fps} video_sec={_video_sec:.6g} "
+                f"audio_sec={_audio_sec} audio_path={audio_file_path!r} "
+                f"note=no_shortest_mux_ends_when_rawvideo_stdin_EOF",
+            )
             _cands = get_video_encoder_candidates(FFMPEG_EXE, preset)
             _save_mp4_dbg("ENCODER_LIST", f"candidates={[c['name'] for c in _cands]!r}")
 
@@ -330,11 +350,14 @@ class AnymatixSaveAnimatedMP4:
 
                 ffmpeg_cmd.extend(encoder_candidate['args'])
 
+                # Do NOT use -shortest here: rawvideo arrives from stdin and may extend
+                # longer than the muxed WAV. With -shortest, FFmpeg exits when the shorter
+                # stream ends (often audio first) while Python is still piping frames ->
+                # BrokenPipeError on stdin even though stderr shows encoder progress.
                 if audio_file_path is not None:
                     ffmpeg_cmd.extend([
                         '-c:a', 'aac',
                         '-b:a', '192k',
-                        '-shortest'
                     ])
 
                 gop = str(max(12, int(round(fps * 2))))
