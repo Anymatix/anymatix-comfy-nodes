@@ -6,6 +6,13 @@ import tempfile
 import shutil
 import sys
 
+# Dev/instrumentation: one tag for grepping ComfyUI logs
+_DBG = "[ANYMATIX_SAVE_MP4]"
+
+
+def _save_mp4_dbg(tag: str, detail: str) -> None:
+    print(f"{_DBG} {tag} | {detail}")
+
 # Try to import imageio-ffmpeg for automatic FFmpeg management
 try:
     import imageio_ffmpeg
@@ -163,6 +170,11 @@ class AnymatixSaveAnimatedMP4:
         Save VIDEO object as MP4 using FFmpeg pipe input for efficient on-the-fly encoding.
         No temporary files - frames are piped directly to FFmpeg stdin as raw RGB data.
         """
+        _save_mp4_dbg(
+            "ENTER",
+            f"output_path={output_path!r} filename_prefix={filename_prefix!r} quality={quality!r} "
+            f"ffmpeg_available={FFMPEG_AVAILABLE} comfy_output_root={folder_paths.get_output_directory()!r}",
+        )
         # Extract components from VIDEO object
         components = video.get_components()
         images = components.images
@@ -187,6 +199,7 @@ class AnymatixSaveAnimatedMP4:
             print("")
             print("After installation, restart ComfyUI and try again.")
             print("=" * 70)
+            _save_mp4_dbg("RETURN", "path=EARLY_NO_FFMPEG ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
             
         preset = self.codec_presets.get(quality, self.codec_presets["web_compatible"])
@@ -204,6 +217,7 @@ class AnymatixSaveAnimatedMP4:
         # Check if we have images to process
         if images is None or len(images) == 0:
             print("No frames to save")
+            _save_mp4_dbg("RETURN", "path=EARLY_NO_FRAMES ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
         
         # Prepare filename
@@ -217,12 +231,25 @@ class AnymatixSaveAnimatedMP4:
             full_output_path,
             f".{filename}.tmp-{os.getpid()}.mp4"
         )
+        _save_mp4_dbg(
+            "PATHS",
+            f"file_path={file_path!r} temp_file_path={temp_file_path!r}",
+        )
         
         # Get frame dimensions from first image
         height, width = images[0].shape[:2]
         total_frames = len(images)
         
         print(f"Creating video: {filename} ({total_frames} frames at {fps} fps, {width}x{height})")
+        try:
+            _t0 = images[0].detach().cpu().float().numpy()
+            _save_mp4_dbg(
+                "FRAME0_STATS",
+                f"shape={getattr(_t0, 'shape', '?')} min={float(np.nanmin(_t0)):.6g} "
+                f"max={float(np.nanmax(_t0)):.6g} all_finite={bool(np.isfinite(_t0).all())}",
+            )
+        except Exception as _e:
+            _save_mp4_dbg("FRAME0_STATS", f"failed_to_compute err={_e!r}")
         
         try:
             # Handle audio - need temp file for audio only (can't pipe two streams)
@@ -231,6 +258,7 @@ class AnymatixSaveAnimatedMP4:
             
             if audio is not None:
                 print("Audio provided - will mux with video")
+                _save_mp4_dbg("AUDIO", "branch=MUX temp_wav")
                 temp_dir = tempfile.mkdtemp()
                 audio_file_path = os.path.join(temp_dir, "audio.wav")
                 try:
@@ -262,16 +290,22 @@ class AnymatixSaveAnimatedMP4:
                     
                     output_container.close()
                     print(f"Prepared audio: {sample_rate}Hz, {num_channels} channel(s)")
+                    _save_mp4_dbg("AUDIO_OK", f"path={audio_file_path!r}")
                 except Exception as e:
                     print(f"Warning: Could not process audio: {e}")
+                    _save_mp4_dbg("AUDIO_FAIL", f"err={e!r} continuing_video_only")
                     audio_file_path = None
+            else:
+                _save_mp4_dbg("AUDIO", "branch=NONE")
             
             process = None
             stdout = b""
             stderr = b""
             last_error = None
+            _cands = get_video_encoder_candidates(FFMPEG_EXE, preset)
+            _save_mp4_dbg("ENCODER_LIST", f"candidates={[c['name'] for c in _cands]!r}")
 
-            for encoder_candidate in get_video_encoder_candidates(FFMPEG_EXE, preset):
+            for encoder_candidate in _cands:
                 ffmpeg_cmd = [
                     FFMPEG_EXE,
                     '-y',
@@ -323,6 +357,7 @@ class AnymatixSaveAnimatedMP4:
                 ffmpeg_cmd.append(temp_file_path)
 
                 print(f"Starting FFmpeg pipe encoding with {encoder_candidate['name']}...")
+                _save_mp4_dbg("ENCODER_TRY", f"name={encoder_candidate['name']!r}")
 
                 process = subprocess.Popen(
                     ffmpeg_cmd,
@@ -335,8 +370,15 @@ class AnymatixSaveAnimatedMP4:
                 pbar = comfy.utils.ProgressBar(total_frames)
 
                 try:
-                    for image in images:
-                        img_np = (255.0 * image.cpu().numpy()).astype(np.uint8)
+                    for _fi, image in enumerate(images):
+                        _arr = image.cpu().numpy()
+                        if not np.isfinite(_arr).all():
+                            _save_mp4_dbg(
+                                "FRAME_NONFINITE",
+                                f"encoder={encoder_candidate['name']!r} frame_index={_fi} "
+                                f"bad_count={int(np.sum(~np.isfinite(_arr)))}",
+                            )
+                        img_np = (255.0 * _arr).astype(np.uint8)
                         process.stdin.write(img_np.tobytes())
                         pbar.update(1)
 
@@ -355,26 +397,49 @@ class AnymatixSaveAnimatedMP4:
                     except OSError:
                         pass
                     print(f"Encoder {encoder_candidate['name']} failed: {encoder_error}")
+                    _save_mp4_dbg(
+                        "ENCODER_PIPE_EXCEPTION",
+                        f"name={encoder_candidate['name']!r} err={encoder_error!r}",
+                    )
                     continue
 
                 if process.returncode == 0:
                     print(f"FFmpeg encoding succeeded with {encoder_candidate['name']}")
+                    _sz = os.path.getsize(temp_file_path) if os.path.exists(temp_file_path) else -1
+                    _save_mp4_dbg(
+                        "ENCODER_OK",
+                        f"name={encoder_candidate['name']!r} temp_bytes={_sz}",
+                    )
                     break
 
-                last_error = RuntimeError(stderr.decode())
+                _stderr_txt = ""
+                try:
+                    _stderr_txt = stderr.decode(errors="replace") if stderr else ""
+                except Exception:
+                    _stderr_txt = "<decode_err>"
+                last_error = RuntimeError(_stderr_txt)
                 try:
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 except OSError:
                     pass
                 print(f"Encoder {encoder_candidate['name']} failed, trying fallback...")
+                _tail = _stderr_txt[-800:] if len(_stderr_txt) > 800 else _stderr_txt
+                _save_mp4_dbg(
+                    "ENCODER_FFMPEG_FAIL",
+                    f"name={encoder_candidate['name']!r} returncode={process.returncode} stderr_tail={_tail!r}",
+                )
             else:
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 print("FFmpeg encoding failed!")
-                print(f"Error: {stderr.decode()}")
+                try:
+                    print(f"Error: {(stderr or b'').decode(errors='replace')}")
+                except Exception:
+                    print("Error: <stderr unavailable>")
                 if last_error is not None:
                     print(f"Last error: {last_error}")
+                _save_mp4_dbg("RETURN", "path=ALL_ENCODERS_FAILED ui_images=0")
                 return {"ui": {"images": [], "animated": (True,)}}
             
             # Cleanup temp audio file
@@ -383,11 +448,15 @@ class AnymatixSaveAnimatedMP4:
             
             # Publish atomically: the final URL must not exist until FFmpeg has
             # closed and synced a complete MP4.
+            _tmp_exists = os.path.exists(temp_file_path)
+            _tmp_sz = os.path.getsize(temp_file_path) if _tmp_exists else 0
+            _save_mp4_dbg("ATOMIC_PRE", f"temp_exists={_tmp_exists} temp_size={_tmp_sz}")
             if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
                 with open(temp_file_path, 'r+b') as f:
                     os.fsync(f.fileno())
 
                 os.replace(temp_file_path, file_path)
+                _save_mp4_dbg("ATOMIC_REPLACE", f"final_path={file_path!r}")
 
                 try:
                     dir_fd = os.open(full_output_path, os.O_DIRECTORY)
@@ -414,16 +483,20 @@ class AnymatixSaveAnimatedMP4:
                 })
             else:
                 print(f"Error: Output file {file_path} was not created or is empty")
+                _save_mp4_dbg("RETURN", "path=ATOMIC_FAIL_EMPTY_OR_MISSING_TEMP ui_images=0")
                 return {"ui": {"images": [], "animated": (True,)}}
                 
         except subprocess.TimeoutExpired:
             process.kill()
             print("Error: FFmpeg encoding timed out (>5 minutes)")
+            _save_mp4_dbg("RETURN", "path=FFMPEG_TIMEOUT ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
         except Exception as e:
             print(f"Error during FFmpeg encoding: {str(e)}")
+            _save_mp4_dbg("RETURN", f"path=TOP_EXCEPTION err={e!r} ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
         
+        _save_mp4_dbg("RETURN", f"path=SUCCESS_FINAL results_count={len(results)}")
         return {"ui": {"images": results, "animated": (True,)}}
 
 
