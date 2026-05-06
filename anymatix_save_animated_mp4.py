@@ -371,14 +371,17 @@ class AnymatixSaveAnimatedMP4:
 
                 try:
                     for _fi, image in enumerate(images):
-                        _arr = image.cpu().numpy()
+                        _arr = image.detach().cpu().float().numpy()
                         if not np.isfinite(_arr).all():
+                            _bad_count = int(np.sum(~np.isfinite(_arr)))
                             _save_mp4_dbg(
                                 "FRAME_NONFINITE",
                                 f"encoder={encoder_candidate['name']!r} frame_index={_fi} "
-                                f"bad_count={int(np.sum(~np.isfinite(_arr)))}",
+                                f"bad_count={_bad_count}",
                             )
-                        img_np = (255.0 * _arr).astype(np.uint8)
+                            _arr = np.nan_to_num(_arr, nan=0.0, posinf=1.0, neginf=0.0)
+                        _arr = np.clip(_arr, 0.0, 1.0)
+                        img_np = np.rint(255.0 * _arr).astype(np.uint8)
                         process.stdin.write(img_np.tobytes())
                         pbar.update(1)
 
@@ -387,6 +390,22 @@ class AnymatixSaveAnimatedMP4:
                     stdout, stderr = process.communicate(timeout=300)
                 except Exception as encoder_error:
                     last_error = encoder_error
+                    _stderr_txt = ""
+                    try:
+                        if process is not None and process.stdin is not None:
+                            try:
+                                process.stdin.close()
+                            except Exception:
+                                pass
+                            process.stdin = None
+                        if process is not None:
+                            try:
+                                stdout, stderr = process.communicate(timeout=5)
+                            except Exception:
+                                stderr = stderr or b""
+                        _stderr_txt = stderr.decode(errors="replace") if stderr else ""
+                    except Exception:
+                        _stderr_txt = "<stderr unavailable>"
                     try:
                         process.kill()
                     except Exception:
@@ -397,9 +416,12 @@ class AnymatixSaveAnimatedMP4:
                     except OSError:
                         pass
                     print(f"Encoder {encoder_candidate['name']} failed: {encoder_error}")
+                    if _stderr_txt:
+                        print(f"Encoder stderr: {_stderr_txt}")
+                    _tail = _stderr_txt[-800:] if len(_stderr_txt) > 800 else _stderr_txt
                     _save_mp4_dbg(
                         "ENCODER_PIPE_EXCEPTION",
-                        f"name={encoder_candidate['name']!r} err={encoder_error!r}",
+                        f"name={encoder_candidate['name']!r} err={encoder_error!r} stderr_tail={_tail!r}",
                     )
                     continue
 
