@@ -885,6 +885,20 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             local_file_size = os.path.getsize(file_path)
             if local_file_size == data["file_size"]:
                 return file_path
+            if local_file_size > data["file_size"]:
+                # Self-heal: a partial larger than the target is corrupt — almost
+                # always a prior resume where the server ignored our Range header and
+                # the full body got appended onto the partial. Discard and start fresh
+                # (otherwise it grows every run and never matches → re-downloads forever).
+                print(
+                    f"[ANYMATIX DOWNLOAD] Discarding oversized/corrupt partial for "
+                    f"{data['file_name']}: {local_file_size} > expected {data['file_size']} bytes"
+                )
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                local_file_size = 0
         elif data["file_size"] is None and os.path.exists(file_path) and file_path.lower().endswith(".json"):
             if is_valid_json_file(file_path):
                 return file_path
@@ -934,6 +948,21 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     def cb(chunk):
                         nonlocal downloaded_size
                         if (chunk):
+                            # Self-heal: if a resume blows past the expected size, the
+                            # server ignored our Range request and is re-sending the
+                            # whole file from byte 0 onto our partial. Abort NOW rather
+                            # than appending the full body (which ballooned to 34GB);
+                            # the failed/oversized file is removed below so the next run
+                            # restarts clean and then caches correctly.
+                            if (
+                                data["file_size"] is not None
+                                and downloaded_size + len(chunk) > data["file_size"]
+                            ):
+                                raise Exception(
+                                    f"Download overshoot for {data['file_name']}: "
+                                    f"server ignored the resume Range (re-sending full body). "
+                                    f"Aborting to avoid an unbounded append; will restart clean."
+                                )
                             file.write(chunk)
                             l = len(chunk)
                             downloaded_size += l
@@ -966,7 +995,18 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             except Exception as e:
                 traditional_exception = e
                 print(f"[ANYMATIX DOWNLOAD] Traditional download also failed: {e}")
-                
+
+                # Self-heal: drop the partial so the next run restarts clean — UNLESS
+                # this is a user interrupt (then keep the partial for a real resume).
+                is_interrupt = "InterruptProcessingException" in type(e).__name__
+                if not is_interrupt:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            print(f"[ANYMATIX DOWNLOAD] Removed partial after failure: {file_path}")
+                    except Exception:
+                        pass
+
                 # If both parallel and traditional failed, raise the more serious exception
                 if parallel_exception and traditional_exception:
                     # Prefer parallel exception if it's more descriptive, otherwise use traditional
@@ -991,10 +1031,16 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         if data["file_size"] is not None:
             actual_size = os.path.getsize(file_path)
             if actual_size != data["file_size"]:
+                # Self-heal: remove the bad file so the next run starts clean instead
+                # of resuming/appending onto it again (the re-download-forever loop).
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
                 raise Exception(
                     f"Downloaded file size mismatch for {data['file_name']}: "
                     f"expected {data['file_size']} bytes, got {actual_size} bytes. "
-                    f"The download may have been interrupted or corrupted."
+                    f"The corrupted file was removed and will be re-downloaded on the next run."
                 )
 
         if file_path.lower().endswith(".json") and not is_valid_json_file(file_path):
