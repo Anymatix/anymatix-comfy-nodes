@@ -816,11 +816,18 @@ async def serve_file(request):
         ):
             # Serving a result renews its TTL, so a download in progress (file
             # by file, resumable) is never swept away mid-transfer.
-            results_root = os.path.abspath(outdir)
-            if file_path.startswith(results_root + os.sep):
+            #
+            # realpath on both sides: file_path came from abspath, which resolves
+            # nothing but inherits an already-resolved cwd, while outdir keeps the
+            # path as configured. One symlink anywhere above the output directory
+            # (/var -> /private/var on macOS, a volume mount on a pod) and a
+            # plain string comparison silently never matches.
+            results_root = os.path.realpath(outdir)
+            real_file_path = os.path.realpath(file_path)
+            if real_file_path.startswith(results_root + os.sep):
                 touch_result(
                     outdir,
-                    os.path.relpath(file_path, results_root).split(os.sep)[0],
+                    os.path.relpath(real_file_path, results_root).split(os.sep)[0],
                 )
             response = web.FileResponse(file_path)
         # else:
