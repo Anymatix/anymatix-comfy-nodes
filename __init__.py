@@ -7,6 +7,7 @@ import app.logger
 import folder_paths
 from aiohttp import web
 import os
+import re
 import hashlib
 import time
 import socket
@@ -367,6 +368,111 @@ outdir = f"{folder_paths.output_directory}/anymatix/results"
 os.makedirs(outdir, exist_ok=True)
 
 
+# --- Autonomous cache GC -----------------------------------------------------
+# The results/input cache expires on its own, on this machine, with no client
+# connected: a pod that stays up for days must not accumulate. Every value is
+# seconds; 0 disables that half of the sweep.
+_CACHE_GC_INTERVAL = int(os.environ.get("ANYMATIX_CACHE_GC_INTERVAL", 600))
+_CACHE_TTL_RESULTS = int(os.environ.get("ANYMATIX_CACHE_TTL_RESULTS", 24 * 3600))
+_CACHE_TTL_INPUTS = int(os.environ.get("ANYMATIX_CACHE_TTL_INPUTS", 3600))
+_CACHE_MIN_AGE = int(os.environ.get("ANYMATIX_CACHE_MIN_AGE", 900))
+
+_QUEUE_HASH_RE = re.compile(r"[a-f0-9]{64}")
+
+
+def _protected_hashes() -> set:
+    """Hashes named by the queue — a run may be writing or about to read them."""
+    try:
+        queue = PromptServer.instance.prompt_queue.get_current_queue()
+        return set(_QUEUE_HASH_RE.findall(json.dumps(queue, default=str)))
+    except Exception as e:
+        # Unknown queue means unknown protection: sweep nothing this round.
+        print(f"anymatix: cache gc could not read the queue ({e}), skipping sweep")
+        return None
+
+
+def _cache_gc_sweep():
+    protected = _protected_hashes()
+    if protected is None:
+        return {"results": [], "inputs": []}
+    return sweep_expired(
+        outdir,
+        folder_paths.input_directory,
+        _CACHE_TTL_RESULTS,
+        _CACHE_TTL_INPUTS,
+        _CACHE_MIN_AGE,
+        protected,
+    )
+
+
+async def _cache_gc_once():
+    result = await asyncio.to_thread(_cache_gc_sweep)
+    if result["results"] or result["inputs"]:
+        print(
+            f"anymatix: cache gc removed {len(result['results'])} results "
+            f"and {len(result['inputs'])} input assets"
+        )
+    return result
+
+
+async def _cache_gc_loop():
+    # First pass at boot: a pod coming up carries whatever the last session left.
+    while True:
+        try:
+            await _cache_gc_once()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            print(f"anymatix: cache gc error: {e}")
+        await asyncio.sleep(_CACHE_GC_INTERVAL)
+
+
+async def _start_cache_gc(_app):
+    if _CACHE_GC_INTERVAL <= 0:
+        print("anymatix: cache gc disabled (ANYMATIX_CACHE_GC_INTERVAL=0)")
+        return
+    print(
+        f"anymatix: cache gc every {_CACHE_GC_INTERVAL}s "
+        f"(results {_CACHE_TTL_RESULTS}s, inputs {_CACHE_TTL_INPUTS}s, min age {_CACHE_MIN_AGE}s)"
+    )
+    asyncio.create_task(_cache_gc_loop())
+
+
+try:
+    PromptServer.instance.app.on_startup.append(_start_cache_gc)
+except Exception as e:
+    print(f"anymatix: could not schedule cache gc: {e}")
+
+
+@routes.post("/anymatix/release_results")
+async def serve_release_results(request):
+    """Release results the app has finished archiving locally.
+
+    Deletes whole result directories by hash and nothing else — no keep set, no
+    reconciliation, so a caller that gets its list wrong can only lose the
+    entries it named. Whatever the app never releases still expires on TTL.
+    """
+    data = await request.json()
+    hashes = data.get("hashes", [])
+    if not isinstance(hashes, list):
+        return web.Response(text="'hashes' must be a list", status=400)
+
+    protected = _protected_hashes() or set()
+    result = await asyncio.to_thread(delete_result_hashes, outdir, hashes, protected)
+    if result["deleted"] or result["skipped"]:
+        print(
+            f"anymatix: released {len(result['deleted'])} results, "
+            f"kept {len(result['skipped'])} still in the queue"
+        )
+    return web.json_response(result)
+
+
+@routes.post("/anymatix/cache_gc")
+async def serve_cache_gc(_request):
+    """Run the expiry sweep now (diagnostics; the loop runs it on its own)."""
+    return web.json_response(await _cache_gc_once())
+
+
 @routes.get("/anymatix/storage_location")
 async def serve_storage_location(request):
     return web.json_response({
@@ -708,14 +814,14 @@ async def serve_file(request):
             and os.path.isfile(file_path)
             and os.access(file_path, os.R_OK)
         ):
-            # TODO: TEMPORARY, WAITING FOR BETTER CLEANUP STRATEGIES
-            if "forget" in request.rel_url.query:
-                try:
-                    os.remove(file_path)
-                    print(f"anymatix: deleted resource {file_path}")
-                    return web.Response(text="Resource deleted (forget)", status=200)
-                except Exception as e:
-                    return web.Response(text=f"Failed to delete resource: {e}", status=500)
+            # Serving a result renews its TTL, so a download in progress (file
+            # by file, resumable) is never swept away mid-transfer.
+            results_root = os.path.abspath(outdir)
+            if file_path.startswith(results_root + os.sep):
+                touch_result(
+                    outdir,
+                    os.path.relpath(file_path, results_root).split(os.sep)[0],
+                )
             response = web.FileResponse(file_path)
         # else:
         #     print("****** anymatix", file_path, "is not allowed or does not exist", os.getcwd())
