@@ -11,6 +11,8 @@ import re
 import hashlib
 import time
 import socket
+import threading
+import time
 from server import PromptServer
 import app
 
@@ -182,6 +184,103 @@ async def anymatix_host_compute_metrics(_request):
     except Exception as e:
         print(f"anymatix: host_compute_metrics error: {e}")
         return web.json_response({"cpu": None, "gpu": None}, status=500)
+
+
+# ── Heartbeat on its own thread, on its own socket ───────────────────────────
+#
+# THE ENDPOINT MUST ANSWER WHILE THE MACHINE IS BUSY, WHICH IS PRECISELY WHEN
+# IT COULD NOT.
+#
+# The route below lives on ComfyUI's aiohttp loop. Staging a model holds that
+# loop for tens of seconds — a z-image run stages 7.6 + 6.4 + 11.7 GB — so the
+# POST went unanswered, the app concluded the machine was dead, tore the
+# session down, and the restart began staging the same models again. Observed
+# as three restarts in six minutes, none reaching step 1 of 9, on a pod billing
+# throughout.
+#
+# So liveness gets its own thread and its own socket. It never touches the
+# event loop, the executor, or any lock they hold: it accepts, reads nothing it
+# does not need, resets the watchdog deadline through a plain threading
+# primitive, and replies. That work needs the GIL for microseconds and spends
+# the rest of its life blocked in accept(), which is exactly the shape of thing
+# the interpreter keeps scheduling while heavy work runs.
+#
+# The aiohttp route stays, unchanged, for clients that only have the one port.
+_hb_deadline_lock = threading.Lock()
+_hb_deadline: float = 0.0
+_hb_timeout_seconds: int = 300
+
+
+def _hb_touch(timeout_seconds: int) -> None:
+    global _hb_deadline, _hb_timeout_seconds
+    with _hb_deadline_lock:
+        _hb_timeout_seconds = timeout_seconds
+        _hb_deadline = time.time() + timeout_seconds
+
+
+def _hb_watchdog() -> None:
+    """Exit when no heartbeat has arrived for the timeout the client asked for.
+
+    Deliberately a thread and not an asyncio task: the whole point is to keep
+    working while the loop is blocked. Nothing has been received yet means
+    nothing to enforce, so a zero deadline waits rather than exits.
+    """
+    while True:
+        time.sleep(5)
+        with _hb_deadline_lock:
+            deadline = _hb_deadline
+            timeout = _hb_timeout_seconds
+        if deadline and time.time() > deadline:
+            print(f"anymatix: heartbeat timeout (no heartbeat for {timeout}s) - exiting")
+            os._exit(1)
+
+
+def _hb_serve(port: int) -> None:
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                timeout = int(json.loads(raw or b"{}").get("timeout", 60))
+            except Exception:
+                timeout = 60
+            _hb_touch(timeout)
+            body = json.dumps({"status": "ok", "seconds_until_death": timeout}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            self.do_POST()
+
+        def log_message(self, *_args):
+            pass  # one line per heartbeat would bury the log it shares
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        print(f"anymatix: heartbeat side-channel could not bind {port}: {e}")
+        return
+    print(f"anymatix: heartbeat side-channel listening on 127.0.0.1:{port}")
+    server.serve_forever()
+
+
+def _start_heartbeat_side_channel() -> None:
+    try:
+        port = int(os.environ.get("ANYMATIX_HEARTBEAT_PORT", "0"))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return
+    threading.Thread(target=_hb_serve, args=(port,), daemon=True).start()
+    threading.Thread(target=_hb_watchdog, daemon=True).start()
+
+
+_start_heartbeat_side_channel()
 
 
 @routes.post('/anymatix/heartbeat')
