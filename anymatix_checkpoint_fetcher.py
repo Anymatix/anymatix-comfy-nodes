@@ -1292,6 +1292,66 @@ class AnymatixSAM2Loader:
 DWPOSE_MODEL_NAME = "yzd-v/DWPose"
 
 
+def _ensure_controlnet_aux_importable(requester: str):
+    """
+    Make `comfyui_controlnet_aux` and its vendored `custom_controlnet_aux`
+    importable, and hand back its `common_annotator_call`.
+
+    The extension has to be imported as a real package: `utils.py` does
+    `from .log import log`, so loading it standalone with exec_module raises
+    "attempted relative import with no known parent package".
+    """
+    import importlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    aux_root = os.path.abspath(os.path.join(here, "..", "comfyui_controlnet_aux"))
+    if not os.path.isfile(os.path.join(aux_root, "utils.py")) or not os.path.isdir(
+        os.path.join(aux_root, "src")
+    ):
+        raise RuntimeError(
+            f"{requester} requires comfyui_controlnet_aux next to anymatix-comfy-nodes."
+        )
+    custom_nodes_parent = os.path.dirname(aux_root)
+    if custom_nodes_parent not in sys.path:
+        sys.path.insert(0, custom_nodes_parent)
+    try:
+        importlib.import_module("comfyui_controlnet_aux")
+    except ImportError as e:
+        raise RuntimeError(
+            f"{requester} requires comfyui_controlnet_aux as sibling under custom_nodes "
+            f"(import comfyui_controlnet_aux failed: {e})"
+        ) from e
+    return importlib.import_module("comfyui_controlnet_aux.utils").common_annotator_call
+
+
+def _resolve_aux_ckpt_path(value: str) -> str:
+    """
+    Contract: input is a model filename coming from AnymatixFetcher.
+    Resolve under AUX_ANNOTATOR_CKPTS_PATH, while tolerating already-resolved
+    absolute paths from older graph wiring.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw) and os.path.isfile(raw):
+        return raw
+    filename = os.path.basename(raw)
+    ckpt_root = os.environ.get("AUX_ANNOTATOR_CKPTS_PATH", "").strip()
+    if not ckpt_root:
+        default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
+        candidate = os.path.join(default_root, filename)
+        return candidate if os.path.isfile(candidate) else filename
+    preferred = os.path.join(ckpt_root, filename)
+    if os.path.isfile(preferred):
+        return preferred
+    # Keep compatibility with installations where prior downloads were written
+    # under the default annotator_ckpts root before AUX_ANNOTATOR_CKPTS_PATH
+    # was honored.
+    default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
+    fallback = os.path.join(default_root, filename)
+    return fallback if os.path.isfile(fallback) else preferred
+
+
 class AnymatixDWPreprocessor:
     """
     DWPose with weights provisioned by AnymatixFetcher (HTTP) into AUX_ANNOTATOR_CKPTS_PATH
@@ -1329,62 +1389,12 @@ class AnymatixDWPreprocessor:
         scale_stick_for_xinsr_cn="disable",
     ):
         import comfy.model_management as model_management
-        import importlib
 
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _aux_root = os.path.abspath(os.path.join(_here, "..", "comfyui_controlnet_aux"))
-        _utils_path = os.path.join(_aux_root, "utils.py")
-        _src_root = os.path.join(_aux_root, "src")
-        if not os.path.isfile(_utils_path) or not os.path.isdir(_src_root):
-            raise RuntimeError(
-                "AnymatixDWPreprocessor requires comfyui_controlnet_aux next to anymatix-comfy-nodes."
-            )
-        _custom_nodes_parent = os.path.dirname(_aux_root)
-        if _custom_nodes_parent not in sys.path:
-            sys.path.insert(0, _custom_nodes_parent)
-        # Load via the real extension package. utils.py uses `from .log import log`;
-        # importing it with exec_module as a standalone top-level module triggers
-        # "attempted relative import with no known parent package".
-        try:
-            importlib.import_module("comfyui_controlnet_aux")
-        except ImportError as e:
-            raise RuntimeError(
-                "AnymatixDWPreprocessor requires comfyui_controlnet_aux as sibling under custom_nodes "
-                f"(import comfyui_controlnet_aux failed: {e})"
-            ) from e
-        utils_mod = importlib.import_module("comfyui_controlnet_aux.utils")
-        common_annotator_call = utils_mod.common_annotator_call
+        common_annotator_call = _ensure_controlnet_aux_importable("AnymatixDWPreprocessor")
         from custom_controlnet_aux.dwpose import DwposeDetector, Wholebody
 
-        def resolve_aux_ckpt_path(value: str) -> str:
-            """
-            Contract: input is a model filename coming from AnymatixFetcher.
-            Resolve under AUX_ANNOTATOR_CKPTS_PATH, while tolerating already-resolved
-            absolute paths from older graph wiring.
-            """
-            raw = (value or "").strip()
-            if not raw:
-                return ""
-            if os.path.isabs(raw) and os.path.isfile(raw):
-                return raw
-            filename = os.path.basename(raw)
-            ckpt_root = os.environ.get("AUX_ANNOTATOR_CKPTS_PATH", "").strip()
-            if not ckpt_root:
-                default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
-                candidate = os.path.join(default_root, filename)
-                return candidate if os.path.isfile(candidate) else filename
-            preferred = os.path.join(ckpt_root, filename)
-            if os.path.isfile(preferred):
-                return preferred
-            # Keep compatibility with installations where prior downloads were written
-            # under the default annotator_ckpts root before AUX_ANNOTATOR_CKPTS_PATH
-            # was honored.
-            default_root = os.path.join(folder_paths.models_dir, "annotator_ckpts")
-            fallback = os.path.join(default_root, filename)
-            return fallback if os.path.isfile(fallback) else preferred
-
-        bd = resolve_aux_ckpt_path(bbox_detector)
-        pe = resolve_aux_ckpt_path(pose_estimator)
+        bd = _resolve_aux_ckpt_path(bbox_detector)
+        pe = _resolve_aux_ckpt_path(pose_estimator)
         if not bd or not pe or not os.path.isfile(bd) or not os.path.isfile(pe):
             raise FileNotFoundError(
                 "DWPose weights missing. Run fetchers first (offline-safe). "
@@ -1438,6 +1448,75 @@ class AnymatixDWPreprocessor:
             "ui": {"openpose_json": [json.dumps(self.openpose_dicts, indent=4)]},
             "result": (out, self.openpose_dicts),
         }
+
+
+class AnymatixHEDPreprocessor:
+    """
+    Soft-edge (HED) lines with the weights provisioned by AnymatixFetcher, so
+    comfyui_controlnet_aux never reaches huggingface_hub while HF_HUB_OFFLINE=1.
+
+    WHY THIS EXISTS AT ALL. `HEDdetector.from_pretrained` resolves its
+    checkpoint through `custom_hf_download` — a network call on first use. That
+    is fine on the machine that built the card and a failure on every machine
+    that only installs it: the card would sit there asking for a file nobody
+    told it how to get. `AnymatixZoeDepthAnythingPreprocessor` and
+    `AnymatixDWPreprocessor` exist for exactly this reason; the `lines` control
+    on z-image ControlNet was still pointed at the raw node and was the last
+    one that could go offline.
+
+    Only the loading changes. The network, the forward pass and the safe-step
+    are the vendored implementation, so the map this produces is the one the
+    upstream node produces — a wrapper, not a reimplementation.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "model_name": ("STRING", {"default": ""}),
+                "safe": (["enable", "disable"], {"default": "enable"}),
+                "resolution": ("INT", {"default": 512, "min": 64, "max": 16384, "step": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "execute"
+    CATEGORY = "ControlNet Preprocessors/Line Extractors"
+    DESCRIPTION = "HED soft-edge lines from a locally fetched checkpoint, fully offline"
+
+    def execute(self, image, model_name, safe="enable", resolution=512):
+        import torch
+        import comfy.model_management as model_management
+
+        common_annotator_call = _ensure_controlnet_aux_importable("AnymatixHEDPreprocessor")
+        from custom_controlnet_aux.hed import ControlNetHED_Apache2, HEDdetector
+
+        model_path = _resolve_aux_ckpt_path(model_name)
+        if not model_path or not os.path.isfile(model_path):
+            raise FileNotFoundError(
+                "HED weights missing. Run the fetcher first (offline-safe). "
+                f"model_name={model_name!r} resolved={model_path!r}"
+            )
+
+        # `from_pretrained` is bypassed deliberately: it is the only part of the
+        # detector that goes to the network, and everything after it is what we
+        # want unchanged.
+        network = ControlNetHED_Apache2()
+        network.load_state_dict(torch.load(model_path, map_location="cpu"))
+        network.float().eval()
+
+        detector = HEDdetector(network).to(model_management.get_torch_device())
+        try:
+            out = common_annotator_call(
+                detector,
+                image,
+                resolution=resolution,
+                safe=safe == "enable",
+            )
+        finally:
+            del detector
+        return (out,)
 
 
 class AnymatixZoeDepthAnythingPreprocessor:
