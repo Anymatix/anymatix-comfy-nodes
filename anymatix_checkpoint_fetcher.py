@@ -16,6 +16,8 @@ from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
 from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAELoader
 from comfy_extras.nodes_model_patch import ModelPatchLoader
 import shutil
+import threading
+import time
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
@@ -259,6 +261,164 @@ def get_anymatix_models_dir(type_name: str) -> str:
         pass
     # Fallback to internal ComfyUI models directory
     return os.path.join(folder_paths.models_dir, type_name)
+
+
+# ── NVMe-first downloads ─────────────────────────────────────────────────────
+#
+# A fresh download used to pay for its bytes three times on the pod's NIC:
+# once arriving from the internet, once written to the network volume, and
+# once read back from it into the GPU. Downloading INTO the cache instead
+# makes the write local, lets the run start from local disk immediately, and
+# leaves only the durability copy — cache → volume — to run in the background.
+#
+# The sidecar json is the commit mark. It is written to the volume only after
+# the model file has fully arrived there, so "sidecar on the volume" always
+# means "this download is durable"; until then the cache holds both, and the
+# reconcile pass at startup finishes any mirror a restart interrupted. The
+# cache sidecar is deleted once the volume has its own, so the model listing
+# never sees the same download twice for longer than a mirror takes.
+
+# Only types whose subdirectory the bootstrap's yaml block exposes to
+# ComfyUI's search may be cached: a cached file of an unlisted type would be
+# invisible to loaders that resolve by basename until the mirror completed.
+_NVME_CACHED_SUBDIRS = frozenset({
+    "checkpoints", "loras", "vae", "clip", "text_encoders", "controlnet",
+    "diffusion_models", "model_patches", "unet", "upscale_models",
+    "clip_vision", "audio_encoders",
+})
+_NVME_CACHE_MIN_FREE_BYTES = 10 * (1024 ** 3)
+
+
+def _nvme_cache_twin(durable_dir: str) -> Optional[str]:
+    """The cache path that mirrors a durable model dir; no side effects."""
+    cache_root = (os.environ.get("ANYMATIX_NVME_MODEL_CACHE") or "").strip()
+    if not cache_root or _is_under_nvme_cache(durable_dir):
+        return None
+    sub = os.path.basename(os.path.normpath(durable_dir))
+    if sub not in _NVME_CACHED_SUBDIRS:
+        return None
+    return os.path.join(cache_root, sub)
+
+
+def _nvme_cache_dir_for(durable_dir: str) -> Optional[str]:
+    """The cache dir to download into, or None for the pre-cache behaviour —
+    which is also the answer whenever the cache disk lacks honest room."""
+    twin = _nvme_cache_twin(durable_dir)
+    if not twin:
+        return None
+    try:
+        if shutil.disk_usage(os.path.dirname(twin)).free < _NVME_CACHE_MIN_FREE_BYTES:
+            return None
+        os.makedirs(twin, exist_ok=True)
+    except OSError:
+        return None
+    return twin
+
+
+def _copy_atomic(src: str, dst: str) -> None:
+    part = dst + ".part"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, part)
+    os.replace(part, dst)
+
+
+def _sidecars_for_model(dir_path: str, model_basename: str) -> list:
+    out = []
+    try:
+        for item in os.listdir(dir_path):
+            if not item.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(dir_path, item)) as f:
+                    if json.load(f).get("file_name") == model_basename:
+                        out.append(item)
+            except Exception:
+                pass
+    except OSError:
+        pass
+    return out
+
+
+def _mirror_cache_entry_to_volume(cache_dir: str, durable_dir: str, model_basename: str) -> None:
+    """Model first, sidecars last: the sidecar arriving on the volume is what
+    declares the download durable. The cache sidecar goes away afterwards so
+    the same model is never listed twice."""
+    try:
+        src_model = os.path.join(cache_dir, model_basename)
+        dst_model = os.path.join(durable_dir, model_basename)
+        if not os.path.isfile(src_model):
+            return
+        if not (os.path.isfile(dst_model) and os.path.getsize(dst_model) == os.path.getsize(src_model)):
+            t0 = time.time()
+            _copy_atomic(src_model, dst_model)
+            print(f"[ANYMATIX] mirrored {model_basename} to {durable_dir} in {time.time() - t0:.0f}s")
+        for sj in _sidecars_for_model(cache_dir, model_basename):
+            dst = os.path.join(durable_dir, sj)
+            if not os.path.isfile(dst):
+                _copy_atomic(os.path.join(cache_dir, sj), dst)
+            try:
+                os.remove(os.path.join(cache_dir, sj))
+            except OSError:
+                pass
+    except OSError as e:
+        print(
+            f"[ANYMATIX] mirror to volume failed for {model_basename}: {e} — "
+            "the cache copy keeps working; the startup reconcile pass will retry"
+        )
+
+
+def _mirror_cache_entry_async(cache_dir: str, durable_dir: str, model_basename: str) -> None:
+    threading.Thread(
+        target=_mirror_cache_entry_to_volume,
+        args=(cache_dir, durable_dir, model_basename),
+        name="anymatix-nvme-mirror",
+        daemon=True,
+    ).start()
+
+
+def _reconcile_nvme_cache_to_volume() -> None:
+    """Finish any cache → volume mirror a restart interrupted. A cache sidecar
+    with no volume twin is exactly an un-mirrored download."""
+    cache_root = (os.environ.get("ANYMATIX_NVME_MODEL_CACHE") or "").strip()
+    if not cache_root or not os.path.isdir(cache_root):
+        return
+    for sub in sorted(os.listdir(cache_root)):
+        cache_dir = os.path.join(cache_root, sub)
+        if not os.path.isdir(cache_dir):
+            continue
+        try:
+            durable_dir = get_anymatix_models_dir(sub)
+        except Exception:
+            continue
+        if _is_under_nvme_cache(durable_dir):
+            continue
+        try:
+            entries = os.listdir(cache_dir)
+        except OSError:
+            continue
+        for item in entries:
+            if not item.endswith(".json"):
+                continue
+            if os.path.isfile(os.path.join(durable_dir, item)):
+                continue
+            try:
+                with open(os.path.join(cache_dir, item)) as f:
+                    model_basename = json.load(f).get("file_name") or ""
+            except Exception:
+                continue
+            if model_basename and os.path.isfile(os.path.join(cache_dir, model_basename)):
+                print(f"[ANYMATIX] reconciling un-mirrored cache download: {model_basename}")
+                _mirror_cache_entry_to_volume(cache_dir, durable_dir, model_basename)
+
+
+try:
+    threading.Thread(
+        target=_reconcile_nvme_cache_to_volume,
+        name="anymatix-nvme-reconcile",
+        daemon=True,
+    ).start()
+except Exception:
+    pass
 
 CHECKPOINTS_DIR = get_anymatix_models_dir("checkpoints")
 
@@ -1046,14 +1206,42 @@ class AnymatixFetcher:
                 effective = base_url
 
             try:
-                model_name = download_file(
-                    url=base_url,
-                    dir=dir,
-                    callback=callback,
-                    expand_info=expand_info,
-                    effective_url=effective,
-                    redact_append=auth,
+                # NVMe-first: bytes land on local disk and the run starts from
+                # there immediately; a background mirror makes the volume
+                # durable. A url whose sidecar already sits on the volume is
+                # durable already, so it takes the old path — download_file
+                # then finds the file and downloads nothing.
+                durable_has_sidecar = any(
+                    h and os.path.isfile(os.path.join(dir, f"{h}.json"))
+                    for h in {hash_string(base_url or ""), hash_string(effective or "")}
                 )
+                cache_dir = None if durable_has_sidecar else _nvme_cache_dir_for(dir)
+                try:
+                    model_name = download_file(
+                        url=base_url,
+                        dir=cache_dir or dir,
+                        callback=callback,
+                        expand_info=expand_info,
+                        effective_url=effective,
+                        redact_append=auth,
+                    )
+                except Exception:
+                    if not cache_dir:
+                        raise
+                    # Whatever went wrong on the cache disk (full, gone, odd),
+                    # the durable dir is the behaviour that always worked.
+                    print("[ANYMATIX] cache-first download failed — retrying against the durable models dir")
+                    cache_dir = None
+                    model_name = download_file(
+                        url=base_url,
+                        dir=dir,
+                        callback=callback,
+                        expand_info=expand_info,
+                        effective_url=effective,
+                        redact_append=auth,
+                    )
+                if cache_dir:
+                    _mirror_cache_entry_async(cache_dir, dir, os.path.basename(model_name))
                 print("fetched model", model_name)
                 return (model_name,)
             except Exception as e:
@@ -1146,9 +1334,21 @@ class AnymatixFetcher:
         url_hash = hash_string(effective)
         dir_path = get_anymatix_models_dir(dirmap[url["type"]])
         json_path = os.path.join(dir_path, f"{url_hash}.json")
-        
-        # If JSON doesn't exist, file needs to be downloaded
+
+        # If JSON doesn't exist, file needs to be downloaded — unless the
+        # download sits in the NVMe cache with its mirror to the volume still
+        # in flight; that is a complete download, not a missing one.
         if not os.path.exists(json_path):
+            twin = _nvme_cache_twin(dir_path)
+            if twin:
+                twin_json = os.path.join(twin, f"{url_hash}.json")
+                try:
+                    with open(twin_json) as f:
+                        twin_file = json.load(f).get("file_name") or ""
+                    if twin_file and os.path.isfile(os.path.join(twin, twin_file)):
+                        return url_hash
+                except Exception:
+                    pass
             return float("NaN")
         
         # Read JSON to get expected file name
