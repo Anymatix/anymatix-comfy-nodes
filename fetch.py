@@ -147,7 +147,7 @@ def fetch_headers(url, session):
 
 
 def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size: int = 0, chunk_size=8192) -> None:
-    """Traditional fetch with graceful fallback"""
+    """One connection, start to finish — and the only path that can resume."""
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library not available")
         
@@ -165,16 +165,16 @@ def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size:
                 check_interrupted()
                 callback(item)
     except requests.RequestException as e:
-        raise Exception(f"HTTP request failed during traditional download: {e}") from e
+        raise Exception(f"HTTP request failed during single-stream download: {e}") from e
     except Exception as e:
         # Re-raise InterruptProcessingException as-is for proper handling
         if "InterruptProcessingException" in type(e).__name__ or "InterruptProcessingException" in str(type(e)):
             raise
-        raise Exception(f"Unexpected error during traditional download: {e}") from e
+        raise Exception(f"Unexpected error during single-stream download: {e}") from e
 
 
 class SegmentDownloader:
-    """State-of-the-art parallel segment downloader with adaptive optimization"""
+    """Many connections at once, each fetching its own byte range."""
     
     def __init__(self, url: str, file_path: str, total_size: int, 
                  progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -644,8 +644,8 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
     if local_file_size > 0:
         if local_file_size >= total_size:
             return True  # Already complete
-        # For resume, we'll use traditional method for simplicity
-        print(f"[ANYMATIX DOWNLOAD] Resume scenario detected - using traditional download")
+        # A resume needs one ordered stream from the byte we stopped at.
+        print(f"[ANYMATIX DOWNLOAD] Resuming an interrupted download — one connection, picking up where it stopped")
         return False
     
     # Choose download strategy based on available dependencies
@@ -908,7 +908,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
         downloaded_size = local_file_size
 
-        # STATE-OF-THE-ART PARALLEL DOWNLOAD ATTEMPT
+        # PARALLEL DOWNLOAD ATTEMPT — fresh downloads only
         parallel_success = False
         parallel_exception = None
         if local_file_size == 0 and data["file_size"] is not None:  # Only for fresh downloads
@@ -928,14 +928,15 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 else:
                     print(f"[ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
-                print(f"[ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to traditional: {e}")
+                print(f"[ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to a single stream: {e}")
                 parallel_success = False
                 parallel_exception = e
 
-        # TRADITIONAL FALLBACK (backwards compatible)
+        # SINGLE-STREAM FALLBACK — also the resume path: one ordered stream from
+        # the byte we stopped at, which segments cannot express.
         if not parallel_success:
-            print(f"[ANYMATIX DOWNLOAD] Using traditional download for {data['file_name']}")
-            traditional_exception = None
+            print(f"[ANYMATIX DOWNLOAD] Using single-stream download for {data['file_name']}")
+            single_stream_exception = None
             try:
                 file_mode = 'ab' if local_file_size > 0 else 'wb'
                 with open(file_path, file_mode) as file:
@@ -991,11 +992,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                         # Final status message for anymatix terminal
                         if data["file_size"] is not None and downloaded_size == data["file_size"]:
                             mb_final = downloaded_size / (1024 * 1024)
-                            print(f"[ANYMATIX DOWNLOAD] Traditional download completed: {mb_final:.0f}MB")
+                            print(f"[ANYMATIX DOWNLOAD] Single-stream download completed: {mb_final:.0f}MB")
                             
             except Exception as e:
-                traditional_exception = e
-                print(f"[ANYMATIX DOWNLOAD] Traditional download also failed: {e}")
+                single_stream_exception = e
+                print(f"[ANYMATIX DOWNLOAD] Single-stream download also failed: {e}")
 
                 # Self-heal: drop the partial so the next run restarts clean — UNLESS
                 # this is a user interrupt (then keep the partial for a real resume).
@@ -1008,19 +1009,19 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     except Exception:
                         pass
 
-                # If both parallel and traditional failed, raise the more serious exception
-                if parallel_exception and traditional_exception:
-                    # Prefer parallel exception if it's more descriptive, otherwise use traditional
+                # If both the parallel and the single-stream attempt failed, raise the more serious exception
+                if parallel_exception and single_stream_exception:
+                    # Prefer the parallel exception when it says more; otherwise the single-stream one
                     if "Range" in str(parallel_exception) or "connection" in str(parallel_exception).lower():
                         raise parallel_exception
                     else:
-                        raise traditional_exception
-                elif traditional_exception:
-                    raise traditional_exception
+                        raise single_stream_exception
+                elif single_stream_exception:
+                    raise single_stream_exception
                 elif parallel_exception:
                     raise parallel_exception
                 else:
-                    raise Exception(f"Both parallel and traditional download methods failed for {data['file_name']}")
+                    raise Exception(f"Both the parallel and the single-stream download failed for {data['file_name']}")
 
         # Final verification: ensure file exists and has correct size before returning
         if not os.path.exists(file_path):
@@ -1190,9 +1191,9 @@ def benchmark_download_methods(url: str, output_dir: str) -> dict:
     except Exception as e:
         results["parallel"] = {"success": False, "error": str(e)}
     
-    # Test traditional download for comparison
+    # Time a single stream for comparison
     try:
-        test_file = os.path.join(output_dir, f"benchmark_traditional_{int(time.time())}")
+        test_file = os.path.join(output_dir, f"benchmark_single_stream_{int(time.time())}")
         start_time = time.time()
         
         with requests.Session() as session:
@@ -1205,7 +1206,7 @@ def benchmark_download_methods(url: str, output_dir: str) -> dict:
         end_time = time.time()
         actual_size = os.path.getsize(test_file)
         
-        results["traditional"] = {
+        results["single_stream"] = {
             "time": end_time - start_time,
             "speed_mbps": (actual_size / (1024*1024)) / (end_time - start_time),
             "success": True
@@ -1213,14 +1214,14 @@ def benchmark_download_methods(url: str, output_dir: str) -> dict:
         os.remove(test_file)  # Cleanup
         
     except Exception as e:
-        results["traditional"] = {"success": False, "error": str(e)}
+        results["single_stream"] = {"success": False, "error": str(e)}
     
     # Calculate speedup
     if (results.get("parallel", {}).get("success") and 
-        results.get("traditional", {}).get("success")):
-        speedup = results["traditional"]["time"] / results["parallel"]["time"]
+        results.get("single_stream", {}).get("success")):
+        speedup = results["single_stream"]["time"] / results["parallel"]["time"]
         results["speedup"] = f"{speedup:.2f}x"
-        results["bandwidth_improvement"] = f"{results['parallel']['speed_mbps']:.1f} vs {results['traditional']['speed_mbps']:.1f} MB/s"
+        results["bandwidth_improvement"] = f"{results['parallel']['speed_mbps']:.1f} vs {results['single_stream']['speed_mbps']:.1f} MB/s"
     
     return results
 
