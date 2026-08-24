@@ -924,7 +924,14 @@ dirmap = {
 # comfyui_controlnet_aux never calls huggingface_hub while HF_HUB_OFFLINE=1.
 # "dwpose_aux" is the original name and stays for the cards that use it; HED
 # arrives by the same road and must not need a second one.
-_AUX_ANNOTATOR_TYPES = ("dwpose_aux", "hed")
+_AUX_ANNOTATOR_TYPES = ("dwpose_aux", "hed", "depth_anything_v2_checkpoint")
+
+# Some upstream nodes we do NOT wrap resolve their own weights through
+# controlnet_aux's custom_hf_download, which looks for
+# <ckpts>/<org>/<repo>/<filename> and only reaches the network when that path
+# is missing. Fetching into exactly that shape makes those nodes work offline
+# with no wrapper and no card change: they find the file and never ask.
+_AUX_HF_LAYOUT_TYPES = ("depth_anything_v2_checkpoint",)
 
 
 _DWPOSE_AUX_HF_RE = re.compile(
@@ -944,7 +951,7 @@ def _ensure_aux_annotator_ckpts_dir() -> str:
     return d
 
 
-def _destination_path_for_dwpose_aux_url(base_url: str, root: str) -> str:
+def _destination_path_for_dwpose_aux_url(base_url: str, root: str, nested: bool = False) -> str:
     m = _DWPOSE_AUX_HF_RE.match((base_url or "").strip())
     if not m:
         raise ValueError(
@@ -952,8 +959,11 @@ def _destination_path_for_dwpose_aux_url(base_url: str, root: str) -> str:
             "https://huggingface.co/<org>/<repo>/resolve/main/<filename>"
         )
     fn = m.group(3)
-    # Runtime contract: DWPose node consumes plain filenames and resolves them
-    # under AUX_ANNOTATOR_CKPTS_PATH (flat layout).
+    if nested:
+        # custom_hf_download's own layout: <ckpts>/<org>/<repo>/<filename>.
+        return os.path.join(root, m.group(1), m.group(2), fn)
+    # Runtime contract: our own wrapper nodes consume plain filenames and
+    # resolve them under AUX_ANNOTATOR_CKPTS_PATH (flat layout).
     return os.path.join(root, fn)
 
 
@@ -1148,7 +1158,9 @@ class AnymatixFetcher:
             else:
                 effective = base_url
 
-            dest = _destination_path_for_dwpose_aux_url(effective, root)
+            dest = _destination_path_for_dwpose_aux_url(
+                effective, root, nested=url.get("type") in _AUX_HF_LAYOUT_TYPES
+            )
             pbar = comfy.utils.ProgressBar(1000)
             prog_holder = [0]
 
@@ -1374,7 +1386,9 @@ class AnymatixFetcher:
                     effective = urlunparse(p._replace(query=urlencode(existing + to_add)))
                 else:
                     effective = base_url
-                dest = _destination_path_for_dwpose_aux_url(effective, root)
+                dest = _destination_path_for_dwpose_aux_url(
+                effective, root, nested=url.get("type") in _AUX_HF_LAYOUT_TYPES
+            )
                 if os.path.isfile(dest):
                     return hash_string(effective)
             except Exception:
