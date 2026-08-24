@@ -1090,6 +1090,10 @@ async def serve_resources(_request):
             model_path = os.path.join(os.path.dirname(path), model_filename)
             if os.path.isfile(model_path):
                 data["file_size"] = os.path.getsize(model_path)
+                # Last USE, not last download: the fetcher touches a model's
+                # mtime on every resolve, so this orders storage-full pruning
+                # by what the user's workflows want least.
+                data["mtime"] = os.path.getmtime(model_path)
         return (data, type)
 
     result: Dict[str, list] = {}
