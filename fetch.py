@@ -489,11 +489,19 @@ class AsyncParallelDownloader:
                 segments.append((len(segments), start, end))
             
             # Configure HTTP/2 connector with connection pooling
+            # KEEP THE CONNECTIONS ALIVE, WHICH IS THE ENTIRE POINT.
+            #
+            # force_close=True closes every connection after one response and
+            # is mutually exclusive with keepalive_timeout — aiohttp raises
+            # "keepalive_timeout cannot be set if force_close is True" the
+            # moment the session is built. So the parallel downloader has been
+            # dying at construction and silently falling back to one stream on
+            # every large download. Keep-alive is what makes segment fetching
+            # worth doing at all, so force_close is the one that goes.
             connector = aiohttp.TCPConnector(
                 limit=self.max_connections,
                 limit_per_host=self.max_connections,
                 enable_cleanup_closed=True,
-                force_close=True,
                 keepalive_timeout=30
             )
             
