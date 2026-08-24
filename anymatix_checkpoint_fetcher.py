@@ -229,16 +229,32 @@ class AnymatixSeedVR2LoadVAEModel():
         }
         return io.NodeOutput(config)
 
+def _is_under_nvme_cache(path: str) -> bool:
+    """The NVMe cache (ANYMATIX_NVME_MODEL_CACHE) is a read-only overlay:
+    searched first so weights load from local disk, but never a download
+    destination — a download landing there would die with the container
+    instead of persisting on the volume."""
+    cache_root = (os.environ.get("ANYMATIX_NVME_MODEL_CACHE") or "").strip()
+    if not cache_root:
+        return False
+    cache_root = os.path.normpath(cache_root)
+    p = os.path.normpath(path)
+    return p == cache_root or p.startswith(cache_root + os.sep)
+
+
 def get_anymatix_models_dir(type_name: str) -> str:
     """
     Get the primary directory for a model type, respecting extra_model_paths.yaml.
     """
     try:
-        # folder_paths.get_folder_paths return a list of paths
-        # The first path is the primary (default) one if is_default: true was used in YAML
+        # folder_paths.get_folder_paths return a list of paths.
+        # The front of the list is the NVMe cache when one is configured, so
+        # the download destination is the first path NOT inside the cache.
         paths = folder_paths.get_folder_paths(type_name)
-        if paths:
-            return paths[0]
+        for p in paths or []:
+            if _is_under_nvme_cache(p):
+                continue
+            return p
     except Exception:
         pass
     # Fallback to internal ComfyUI models directory
