@@ -11,6 +11,7 @@ import re
 import hashlib
 import time
 import socket
+import signal
 import threading
 import time
 from server import PromptServer
@@ -161,8 +162,7 @@ async def _heartbeat_timer(timeout_seconds: int):
     """
     try:
         await asyncio.sleep(timeout_seconds)
-        print(f"anymatix: heartbeat timeout (no heartbeat for {timeout_seconds}s) - exiting")
-        os._exit(1)
+        _end_container(f"no heartbeat for {timeout_seconds}s")
     except asyncio.CancelledError:
         # Timer was reset/cancelled by a newer heartbeat; that's normal
         return
@@ -206,6 +206,50 @@ async def anymatix_host_compute_metrics(_request):
 # the interpreter keeps scheduling while heavy work runs.
 #
 # The aiohttp route stays, unchanged, for clients that only have the one port.
+def _end_container(reason: str) -> None:
+    """End the whole pod, not just this process.
+
+    THE PROCESS DYING IS NOT THE POINT — THE BILL STOPPING IS.
+    `os._exit(1)` ended ComfyUI and left the container up, so a pod whose app
+    had gone away kept charging with nothing running inside it. That is the
+    shape of the failure that left one pod up overnight.
+
+    ANYMATIX_ONDISCONNECT decides stop vs terminate, the same setting the app
+    already exposes; a key is used when one is present because only the API can
+    truly terminate, and without one ending the container is the honest best.
+    """
+    print(f"anymatix: {reason} - ending container")
+    action = os.environ.get("ANYMATIX_ONDISCONNECT", "terminate").strip()
+    pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
+    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    if pod_id and api_key:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"https://api.runpod.io/v2/pods/{pod_id}/action",
+                data=json.dumps({"action": "terminate" if action == "terminate" else "stop"}).encode(),
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=10).read()
+            print("anymatix: pod action accepted")
+        except Exception as e:
+            print(f"anymatix: pod action failed ({e}); ending container instead")
+    # Whether or not the API answered, stop costing money for a machine with
+    # nothing running on it. Killing PID 1 may be ignored by the kernel, so the
+    # namespace goes last and takes this process with it.
+    try:
+        os.kill(1, signal.SIGTERM)
+        time.sleep(5)
+    except Exception:
+        pass
+    try:
+        os.kill(-1, signal.SIGKILL)
+    except Exception:
+        pass
+    os._exit(1)
+
+
 _hb_deadline_lock = threading.Lock()
 _hb_deadline: float = 0.0
 _hb_timeout_seconds: int = 300
@@ -231,8 +275,7 @@ def _hb_watchdog() -> None:
             deadline = _hb_deadline
             timeout = _hb_timeout_seconds
         if deadline and time.time() > deadline:
-            print(f"anymatix: heartbeat timeout (no heartbeat for {timeout}s) - exiting")
-            os._exit(1)
+            _end_container(f"no heartbeat for {timeout}s")
 
 
 def _hb_serve(port: int) -> None:
