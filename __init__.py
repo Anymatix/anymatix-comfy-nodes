@@ -219,9 +219,15 @@ def _end_container(reason: str) -> None:
     truly terminate, and without one ending the container is the honest best.
     """
     print(f"anymatix: {reason} - ending container")
-    action = os.environ.get("ANYMATIX_ONDISCONNECT", "terminate").strip()
+    action = os.environ.get("ANYMATIX_ONDISCONNECT", "stop").strip()
     pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
     api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    # NOT IN A CONTAINER: exiting the process IS stopping the machine. The
+    # escalation below (signal PID 1, then SIGKILL the process group) is for a
+    # pod, where the namespace dying is what stops the bill. On somebody's
+    # desktop, PID 1 is their init and -1 is EVERY PROCESS THEY OWN.
+    if not pod_id and not os.path.exists("/.dockerenv"):
+        os._exit(0)
     if pod_id and api_key:
         try:
             import urllib.request
