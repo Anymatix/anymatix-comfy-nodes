@@ -920,6 +920,13 @@ dirmap = {
     "chatterbox_model_pack": "chatterbox_model_pack",
 }
 
+# Annotator checkpoints: one flat directory, fetched by us so
+# comfyui_controlnet_aux never calls huggingface_hub while HF_HUB_OFFLINE=1.
+# "dwpose_aux" is the original name and stays for the cards that use it; HED
+# arrives by the same road and must not need a second one.
+_AUX_ANNOTATOR_TYPES = ("dwpose_aux", "hed")
+
+
 _DWPOSE_AUX_HF_RE = re.compile(
     r"^https://huggingface\.co/([^/]+)/([^/]+)/resolve/main/([^?#]+)"
 )
@@ -1129,7 +1136,7 @@ class AnymatixFetcher:
 
             return download_chatterbox_hf_pack(url, callback)
 
-        if url.get("type") == "dwpose_aux":
+        if url.get("type") in _AUX_ANNOTATOR_TYPES:
             root = _ensure_aux_annotator_ckpts_dir()
             base_url = (url.get("url") or "").strip()
             auth = url.get("auth")
@@ -1326,6 +1333,21 @@ class AnymatixFetcher:
                 user_msg_with_url = f"{user_msg}\nURL: {base_url}"
                 raise Exception(user_msg_with_url) from e
 
+        # AN UNKNOWN TYPE MUST SAY SO, NOT VANISH.
+        #
+        # Every branch above returns; falling past them returned None, and a
+        # node whose RETURN_TYPES promise a string handing back a bare None
+        # makes ComfyUI fail while unpacking it — "object of type 'NoneType'
+        # has no len()", from a stack frame that names neither this node nor
+        # the type it could not place. That is how a card wired to `url/hed`
+        # spent a deployment looking like a bug in the HED preprocessor.
+        raise ValueError(
+            f"AnymatixFetcher does not know how to fetch type "
+            f"{url.get('type')!r}. Known types: "
+            f"{', '.join(sorted(set(dirmap) | set(_AUX_ANNOTATOR_TYPES) | {'chatterbox_model_pack'}))}. "
+            f"URL: {url.get('url')}"
+        )
+
     @classmethod
     def IS_CHANGED(cls, url):
         """
@@ -1340,7 +1362,7 @@ class AnymatixFetcher:
             print(f"[ANYMATIX IS_CHANGED] Chatterbox pack missing {ve_path}, forcing fetch")
             return float("NaN")
 
-        if url.get("type") == "dwpose_aux":
+        if url.get("type") in _AUX_ANNOTATOR_TYPES:
             try:
                 root = _ensure_aux_annotator_ckpts_dir()
                 base_url = (url.get("url") or "").strip()
