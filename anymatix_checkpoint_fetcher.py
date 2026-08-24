@@ -315,10 +315,35 @@ def _nvme_cache_dir_for(durable_dir: str) -> Optional[str]:
     return twin
 
 
-def _copy_atomic(src: str, dst: str) -> None:
+def _queue_is_busy() -> bool:
+    """Whether a prompt is queued or executing, read in-process (no HTTP, so it
+    answers even while the event loop is blocked staging a model)."""
+    try:
+        from server import PromptServer
+        return PromptServer.instance.prompt_queue.get_tasks_remaining() > 0
+    except Exception:
+        # Cannot tell — do not stall durability work forever on a guess.
+        return False
+
+
+def _copy_atomic(src: str, dst: str, chunk_bytes: int = 64 * 1024 * 1024) -> None:
+    """Chunked copy + rename, yielding the volume's bandwidth to the queue.
+
+    Mirrors and reconciles are durability work, and durability can wait a few
+    minutes; a run that wants the volume for its own models cannot. Readers
+    see complete files or nothing: `.part` until the atomic rename.
+    """
     part = dst + ".part"
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copy2(src, part)
+    with open(src, "rb") as fsrc, open(part, "wb") as fdst:
+        while True:
+            while _queue_is_busy():
+                time.sleep(5)
+            buf = fsrc.read(chunk_bytes)
+            if not buf:
+                break
+            fdst.write(buf)
+    shutil.copystat(src, part)
     os.replace(part, dst)
 
 
@@ -1242,6 +1267,15 @@ class AnymatixFetcher:
                     )
                 if cache_dir:
                     _mirror_cache_entry_async(cache_dir, dir, os.path.basename(model_name))
+                elif durable_has_sidecar:
+                    # LAST USED, NOT LAST DOWNLOADED. The warm-up stager ranks
+                    # by the volume's mtimes, so touching a model every time a
+                    # workflow resolves it turns that ranking into a true LRU:
+                    # what you actually use is what the next pass stages.
+                    try:
+                        os.utime(model_name)
+                    except (OSError, TypeError):
+                        pass
                 print("fetched model", model_name)
                 return (model_name,)
             except Exception as e:
