@@ -661,26 +661,27 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
                     raise Exception(f"Async parallel download failed for {url}")
                 return success
 
-            # Run async download.
-            # If an event loop is already running in this thread, use a dedicated loop
-            # to avoid `run_until_complete` failures and leaked coroutine warnings.
-            created_loop = False
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                created_loop = True
+            # Run the async download in a DEDICATED THREAD with its own loop.
+            # A fresh loop in THIS thread is not enough: asyncio refuses to
+            # run any loop in a thread that already has one running, and
+            # ComfyUI executes nodes with its loop running — so this path
+            # raised "Cannot run the event loop while another loop is
+            # running" every time, silently demoting every download to
+            # single-stream.
+            outcome: list = []
 
-            if loop.is_running():
-                loop = asyncio.new_event_loop()
-                created_loop = True
+            def _runner():
+                try:
+                    outcome.append(asyncio.run(run_async()))
+                except BaseException as e:
+                    outcome.append(e)
 
-            try:
-                return loop.run_until_complete(run_async())
-            finally:
-                if created_loop:
-                    loop.close()
+            t = threading.Thread(target=_runner, name="anymatix-parallel-download")
+            t.start()
+            t.join()
+            if outcome and isinstance(outcome[0], BaseException):
+                raise outcome[0]
+            return bool(outcome and outcome[0])
         else:
             # Fallback to threaded parallel download
             print(f"[ANYMATIX DOWNLOAD] Using threaded parallel download strategy")

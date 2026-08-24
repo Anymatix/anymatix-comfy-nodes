@@ -335,16 +335,26 @@ def _copy_atomic(src: str, dst: str, chunk_bytes: int = 64 * 1024 * 1024) -> Non
     """
     part = dst + ".part"
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with open(src, "rb") as fsrc, open(part, "wb") as fdst:
-        while True:
-            while _queue_is_busy():
-                time.sleep(5)
-            buf = fsrc.read(chunk_bytes)
-            if not buf:
-                break
-            fdst.write(buf)
-    shutil.copystat(src, part)
-    os.replace(part, dst)
+    try:
+        with open(src, "rb") as fsrc, open(part, "wb") as fdst:
+            while True:
+                while _queue_is_busy():
+                    time.sleep(5)
+                buf = fsrc.read(chunk_bytes)
+                if not buf:
+                    break
+                fdst.write(buf)
+        shutil.copystat(src, part)
+        os.replace(part, dst)
+    except BaseException:
+        # A failed mirror against a full volume must not leave its partial
+        # behind: the reconcile retries every boot, and orphaned .part files
+        # would eat the very space the volume no longer has.
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
 
 
 def _sidecars_for_model(dir_path: str, model_basename: str) -> list:
@@ -1296,7 +1306,13 @@ class AnymatixFetcher:
                     user_msg = f"Failed to download {model_type} model: Access denied. The model may be private or require authentication."
                 elif "429" in error_str or "rate limit" in error_str.lower():
                     user_msg = f"Failed to download {model_type} model: Too many requests. Please wait a moment and try again."
-                elif "Errno 28" in error_str or "No space left on device" in error_str:
+                elif (
+                    "Errno 28" in error_str or "No space left on device" in error_str
+                    or "Errno 122" in error_str or "Disk quota exceeded" in error_str
+                ):
+                    # Errno 122 is what a full RunPod network volume actually
+                    # raises — quota, not ENOSPC — and it deserves the same
+                    # storage-full affordance in the UI.
                     storage_path = dir
                     user_msg = f"Failed to download {model_type} model: No space left on device.\n[ANYMATIX_STORAGE_FULL:{storage_path}]"
                 else:
