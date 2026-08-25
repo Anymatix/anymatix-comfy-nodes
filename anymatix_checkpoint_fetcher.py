@@ -330,16 +330,23 @@ def _copy_atomic(src: str, dst: str, chunk_bytes: int = 64 * 1024 * 1024) -> Non
     """Chunked copy + rename, yielding the volume's bandwidth to the queue.
 
     Mirrors and reconciles are durability work, and durability can wait a few
-    minutes; a run that wants the volume for its own models cannot. Readers
-    see complete files or nothing: `.part` until the atomic rename.
+    minutes; a run that wants the volume for its own models cannot. But
+    durability may only be SLOWED, never HALTED: this loop used to park
+    outright while anything was queued, and a model is downloaded precisely
+    because a prompt is about to run, so the mirror stood still for the whole
+    session — and a pod stop then erased the cache-only copy. That is the
+    redownload-after-reboot bug of 2026-08-25. One beat of throttle per chunk
+    keeps the volume mostly free for the run while a 40GB mirror still lands
+    in minutes, not never. Readers see complete files or nothing: `.part`
+    until the atomic rename.
     """
     part = dst + ".part"
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
         with open(src, "rb") as fsrc, open(part, "wb") as fdst:
             while True:
-                while _queue_is_busy():
-                    time.sleep(5)
+                if _queue_is_busy():
+                    time.sleep(1)
                 buf = fsrc.read(chunk_bytes)
                 if not buf:
                     break
@@ -402,13 +409,43 @@ def _mirror_cache_entry_to_volume(cache_dir: str, durable_dir: str, model_basena
         )
 
 
+# Every in-flight durability thread, so the one shutdown path we own can wait
+# for them. Daemon threads die silently with the process; a pod stop initiated
+# by OUR watchdog is the moment to refuse that silence.
+_MIRROR_THREADS: list = []
+_MIRROR_THREADS_LOCK = threading.Lock()
+
+
 def _mirror_cache_entry_async(cache_dir: str, durable_dir: str, model_basename: str) -> None:
-    threading.Thread(
+    t = threading.Thread(
         target=_mirror_cache_entry_to_volume,
         args=(cache_dir, durable_dir, model_basename),
         name="anymatix-nvme-mirror",
         daemon=True,
-    ).start()
+    )
+    with _MIRROR_THREADS_LOCK:
+        _MIRROR_THREADS[:] = [x for x in _MIRROR_THREADS if x.is_alive()]
+        _MIRROR_THREADS.append(t)
+    t.start()
+
+
+def drain_mirror_threads(timeout_seconds: float = 120.0) -> None:
+    """Wait for in-flight cache→volume mirrors, bounded.
+
+    Called by the disconnect watchdog before it stops the pod: stopping wipes
+    the container disk, so an unfinished mirror there is a download paid for
+    and lost. When nothing is in flight this returns immediately; when the
+    volume has died, the bound keeps a stuck copy from holding the bill open.
+    """
+    deadline = time.time() + timeout_seconds
+    with _MIRROR_THREADS_LOCK:
+        threads = [t for t in _MIRROR_THREADS if t.is_alive()]
+    for t in threads:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        print(f"[ANYMATIX] waiting for durability: {t.name} ({remaining:.0f}s left)")
+        t.join(timeout=remaining)
 
 
 def _reconcile_nvme_cache_to_volume() -> None:

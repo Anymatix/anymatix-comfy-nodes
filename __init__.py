@@ -219,6 +219,16 @@ def _end_container(reason: str) -> None:
     truly terminate, and without one ending the container is the honest best.
     """
     print(f"anymatix: {reason} - ending container")
+    # Durability first: stopping wipes the container disk, and a cache→volume
+    # mirror still in flight there is a download paid for and lost — the
+    # redownload-after-reboot bug. This is the one stop we initiate ourselves,
+    # so it is the one place the wait can happen. Bounded, and instant when
+    # nothing is mirroring.
+    try:
+        from .anymatix_checkpoint_fetcher import drain_mirror_threads
+        drain_mirror_threads()
+    except Exception as e:
+        print(f"anymatix: mirror drain skipped ({e})")
     action = os.environ.get("ANYMATIX_ONDISCONNECT", "stop").strip()
     pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
     api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
