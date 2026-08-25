@@ -869,22 +869,6 @@ class AnymatixCheckpointFetcher:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
-    # THE FETCHER'S PRODUCT IS THE FILE, NOT THE STRING.
-    #
-    # ComfyUI refuses a STRING output wired into a COMBO widget, so for
-    # enum-typed consumers (DepthAnythingV2Preprocessor's ckpt_name, and any
-    # upstream node like it) the app's compiler replaces the edge with the
-    # basename literal and merges this node into the prompt as an orphan.
-    # ComfyUI executes only the dependency closure of its output nodes: an
-    # orphan is validated, then skipped. The download never ran, the consumer
-    # went hunting on the Hub with HF_HUB_OFFLINE=1, and LTX Depth failed on
-    # every machine that did not already hold the weight.
-    #
-    # OUTPUT_NODE makes ComfyUI execute every fetcher present in the prompt,
-    # linked or not. Fetchers that already hold their file return in
-    # milliseconds, so the only cost is paid when the download was needed
-    # anyway.
-    OUTPUT_NODE = True
     DEPRECATED = True
 
     def download_model(self, url, auth=None):
@@ -1175,6 +1159,22 @@ class AnymatixFetcher:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "download_model"
     CATEGORY = "Anymatix"
+    # THE FETCHER'S PRODUCT IS THE FILE, NOT THE STRING.
+    #
+    # ComfyUI refuses a STRING output wired into a COMBO widget, so for
+    # enum-typed consumers (DepthAnythingV2Preprocessor's ckpt_name, and any
+    # upstream node like it) the app's compiler replaces the edge with the
+    # basename literal and merges this node into the prompt as an orphan.
+    # ComfyUI executes only the dependency closure of its output nodes: an
+    # orphan is validated, then skipped. The download never ran, the consumer
+    # went hunting on the Hub with HF_HUB_OFFLINE=1, and LTX Depth failed on
+    # every machine that did not already hold the weight.
+    #
+    # OUTPUT_NODE makes ComfyUI execute every fetcher present in the prompt,
+    # linked or not. Fetchers that already hold their file return in
+    # milliseconds, so the only cost is paid when the download was needed
+    # anyway.
+    OUTPUT_NODE = True
 
     def download_model(self, url):
         # Avoid printing tokens; only show safe info
