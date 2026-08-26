@@ -101,22 +101,38 @@ def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
     return sha256_hash.hexdigest()
 
 
+CREDENTIAL_QUERY_KEYS = {"token", "api_key", "apikey", "access_token"}
+
+
 def redact_url(u: str, appended: Optional[str] = None) -> str:
     """Return a safe-to-log URL string.
-    Remove only the query parameters contained in 'appended' (if any), preserving all other params.
-    If appended is None, return u unchanged.
+
+    Always strips credential query parameters (token, api_key, ...), and in
+    addition removes the specific parameters contained in 'appended' when the
+    caller knows what it appended.
+
+    It used to return 'u' unchanged when 'appended' was None, which made the
+    name a promise it did not keep: the download URL carries the user's
+    civitai key as a 'token=' tail, and every message interpolating a raw URL
+    put that key into comfyui.runtime.log in cleartext. Measured 2026-08-26 in
+    the Anymatix security audit (F3b). The request itself is always built from
+    the untouched URL; only what gets LOGGED passes through here.
     """
     try:
-        if not appended:
-            return u
         # Parse both URL and appended query tail
         p = urlparse(u)
         current = parse_qsl(p.query, keep_blank_values=True)
-        remove = parse_qsl(appended, keep_blank_values=True)
-        remove_keys = set(k for k, _ in remove)
-        # Remove only matching key-value pairs from tail; if same key appears with multiple values, remove specific pairs
-        remove_pairs = set(remove)
-        kept = [kv for kv in current if kv not in remove_pairs]
+        remove_pairs = set(parse_qsl(appended, keep_blank_values=True)) if appended else set()
+        # Drop the caller's appended pairs, and mask every credential parameter
+        # whoever put it there.
+        kept = []
+        for key, value in current:
+            if (key, value) in remove_pairs:
+                continue
+            if key.lower() in CREDENTIAL_QUERY_KEYS:
+                kept.append((key, "<redacted>"))
+                continue
+            kept.append((key, value))
         new_query = urlencode(kept)
         return urlunparse(p._replace(query=new_query))
     except Exception:
@@ -619,9 +635,9 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
             
             return False, file_size
     except requests.RequestException as e:
-        raise Exception(f"Failed to check range support for {url}: {e}") from e
+        raise Exception(f"Failed to check range support for {redact_url(url)}: {e}") from e
     except Exception as e:
-        raise Exception(f"Unexpected error checking range support for {url}: {e}") from e
+        raise Exception(f"Unexpected error checking range support for {redact_url(url)}: {e}") from e
 
 
 def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -666,7 +682,7 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
                 downloader = AsyncParallelDownloader(url, file_path, total_size, callback, max_connections)
                 success = await downloader.download_async()
                 if not success:
-                    raise Exception(f"Async parallel download failed for {url}")
+                    raise Exception(f"Async parallel download failed for {redact_url(url)}")
                 return success
 
             # Run the async download in a DEDICATED THREAD with its own loop.
@@ -695,9 +711,9 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             print(f"[ANYMATIX DOWNLOAD] Using threaded parallel download strategy")
             downloader = SegmentDownloader(url, file_path, total_size, callback, max_connections)
             if not downloader.download_parallel():
-                raise Exception(f"Threaded parallel download failed for {url}")
+                raise Exception(f"Threaded parallel download failed for {redact_url(url)}")
             if not downloader.assemble_file():
-                raise Exception(f"Failed to assemble downloaded segments for {url}")
+                raise Exception(f"Failed to assemble downloaded segments for {redact_url(url)}")
             return True
         
     except Exception as e:
