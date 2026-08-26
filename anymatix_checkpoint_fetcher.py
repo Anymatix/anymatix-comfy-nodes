@@ -953,8 +953,10 @@ dirmap = {
     "zoedepth": "zoedepth",
     "SEEDVR2_model": "SEEDVR2",
     "SEEDVR2_vae_model": "SEEDVR2",
-    # Virtual type: download target is ComfyUI/models/tts/chatterbox/resembleai_default_voice (see download_model)
+    # Virtual types: the download target is a PACK DIRECTORY, not a file in a
+    # folder_paths category — see CHATTERBOX_PACKS and download_chatterbox_hf_pack.
     "chatterbox_model_pack": "chatterbox_model_pack",
+    "chatterbox_multilingual_pack": "chatterbox_multilingual_pack",
 }
 
 # Annotator checkpoints: one flat directory, fetched by us so
@@ -1024,31 +1026,73 @@ def _stream_download_url_to_path(url: str, dest_path: str, progress_callback) ->
     os.replace(tmp_path, dest_path)
 
 
-def _chatterbox_pack_dir() -> str:
-    """Same layout as ComfyUI-Chatterbox: models/tts/chatterbox/<pack_name> under Comfy root."""
+# TWO CHATTERBOX PACKS, TWO LAYOUTS, AND NEITHER NODE PACK WILL MOVE FOR US.
+#
+# A Chatterbox model is a DIRECTORY of files with canonical names, and each node
+# pack decided for itself where that directory lives and which files belong in
+# it. ComfyUI-Chatterbox reads models/tts/chatterbox/<pack>; Fill-ChatterBox
+# reads models/chatterbox/<pack>, and the multilingual weights are different
+# FILES, not a different revision of the same ones (t3_mtl23ls_v2 next to
+# s3gen.pt, where the English pack has t3_cfg + s3gen.safetensors).
+#
+# So the layout is data, not code: one entry per pack, and everything below
+# reads it. The alternative — a second near-copy of the download loop — is how
+# the first divergence between two packs becomes three.
+CHATTERBOX_PACKS = {
+    "chatterbox_model_pack": {
+        "name": "resembleai_default_voice",
+        "subdir": ("models", "tts", "chatterbox", "resembleai_default_voice"),
+        "files": (
+            "ve.safetensors",
+            "t3_cfg.safetensors",
+            "s3gen.safetensors",
+            "tokenizer.json",
+            "conds.pt",
+        ),
+    },
+    "chatterbox_multilingual_pack": {
+        "name": "chatterbox_multilingual",
+        "subdir": ("models", "chatterbox", "chatterbox_multilingual"),
+        "files": (
+            "ve.pt",
+            "t3_mtl23ls_v2.safetensors",
+            "s3gen.pt",
+            "grapheme_mtl_merged_expanded_v1.json",
+            "conds.pt",
+            "Cangjie5_TC.json",
+        ),
+    },
+}
+
+
+def _chatterbox_pack_spec(pack_type: str) -> dict:
+    spec = CHATTERBOX_PACKS.get(pack_type)
+    if spec is None:
+        raise ValueError(f"unknown Chatterbox pack type {pack_type!r}")
+    return spec
+
+
+def _chatterbox_pack_dir(pack_type: str = "chatterbox_model_pack") -> str:
+    """Pack directory under the Comfy root, in the layout its node pack expects."""
     custom_nodes_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     comfy_root = os.path.abspath(os.path.join(custom_nodes_root, ".."))
-    return os.path.join(comfy_root, "models", "tts", "chatterbox", "resembleai_default_voice")
+    return os.path.join(comfy_root, *_chatterbox_pack_spec(pack_type)["subdir"])
 
 
 def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
     """
-    Pull ResembleAI/Chatterbox multi-file pack into the path Chatterbox nodes expect.
-    Returns the pack directory name consumed by ChatterboxVC / Chatterbox TTS.
+    Pull a ResembleAI/Chatterbox multi-file pack into the path its node expects.
+    Returns the pack directory NAME, which is what the consuming node takes.
     """
+    pack_type = url_dict.get("type") or "chatterbox_model_pack"
+    spec = _chatterbox_pack_spec(pack_type)
     base_url = (url_dict.get("url") or "").rstrip("/")
     if not base_url:
-        raise ValueError("chatterbox_model_pack fetch requires a non-empty url")
+        raise ValueError(f"{pack_type} fetch requires a non-empty url")
     auth = url_dict.get("auth")
-    pack_dir = _chatterbox_pack_dir()
+    pack_dir = _chatterbox_pack_dir(pack_type)
     os.makedirs(pack_dir, exist_ok=True)
-    pack_files = [
-        "ve.safetensors",
-        "t3_cfg.safetensors",
-        "s3gen.safetensors",
-        "tokenizer.json",
-        "conds.pt",
-    ]
+    pack_files = list(spec["files"])
     for pack_file in pack_files:
         file_url = f"{base_url}/resolve/main/{pack_file}"
         downloaded_path = download_file(
@@ -1070,8 +1114,8 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
                 shutil.copy2(downloaded_path, target_path)
         if not os.path.isfile(target_path):
             raise FileNotFoundError(f"Chatterbox pack file missing after download: {target_path}")
-    print("[ANYMATIX] fetched Chatterbox model pack resembleai_default_voice")
-    return ("resembleai_default_voice",)
+    print(f"[ANYMATIX] fetched Chatterbox model pack {spec['name']}")
+    return (spec["name"],)
 
 
 def expand_info_civitai(url):
@@ -1183,7 +1227,7 @@ class AnymatixFetcher:
             print("download model", type(url), safe_preview)
         except Exception:
             pass
-        if url.get("type") == "chatterbox_model_pack":
+        if url.get("type") in CHATTERBOX_PACKS:
             pbar_cb = comfy.utils.ProgressBar(1000)
             prog = 0
             pbar_cb.update_absolute(prog, 1000)
@@ -1409,7 +1453,7 @@ class AnymatixFetcher:
         raise ValueError(
             f"AnymatixFetcher does not know how to fetch type "
             f"{url.get('type')!r}. Known types: "
-            f"{', '.join(sorted(set(dirmap) | set(_AUX_ANNOTATOR_TYPES) | {'chatterbox_model_pack'}))}. "
+            f"{', '.join(sorted(set(dirmap) | set(_AUX_ANNOTATOR_TYPES) | set(CHATTERBOX_PACKS)))}. "
             f"URL: {url.get('url')}"
         )
 
@@ -1420,11 +1464,24 @@ class AnymatixFetcher:
         This prevents ComfyUI from using cached output paths when the actual model
         file has been deleted.
         """
-        if url.get("type") == "chatterbox_model_pack":
-            ve_path = os.path.join(_chatterbox_pack_dir(), "ve.safetensors")
-            if os.path.isfile(ve_path):
+        pack_type = url.get("type")
+        if pack_type in CHATTERBOX_PACKS:
+            # EVERY file, not a sentinel one. A pack whose first file landed and
+            # whose second did not is exactly the state a probe on one file
+            # reports as healthy, and the node then fails on a missing weight
+            # with no mention of the download that never finished.
+            pack_dir = _chatterbox_pack_dir(pack_type)
+            missing = [
+                name
+                for name in _chatterbox_pack_spec(pack_type)["files"]
+                if not os.path.isfile(os.path.join(pack_dir, name))
+            ]
+            if not missing:
                 return hash_string(str(url.get("url") or ""))
-            print(f"[ANYMATIX IS_CHANGED] Chatterbox pack missing {ve_path}, forcing fetch")
+            print(
+                f"[ANYMATIX IS_CHANGED] Chatterbox pack {pack_dir} missing "
+                f"{', '.join(missing)}, forcing fetch"
+            )
             return float("NaN")
 
         if url.get("type") in _AUX_ANNOTATOR_TYPES:
