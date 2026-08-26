@@ -440,25 +440,42 @@ class SegmentDownloader:
             raise Exception(f"Failed to assemble downloaded file: {e}") from e
 
 
-async def fetch_async_segment(session, url: str, start: int, end: int, 
-                            segment_id: int, progress_callback: Optional[Callable] = None) -> Tuple[int, bytes]:
-    """Async segment downloader with HTTP/2 optimization"""
+async def fetch_async_segment(session, url: str, start: int, end: int,
+                            segment_id: int, progress_callback: Optional[Callable] = None,
+                            part_path: Optional[str] = None) -> int:
+    """
+    Download one byte range STRAIGHT TO ITS OFFSET in the part file.
+
+    This used to build the segment in memory — `segment_data += chunk` — and
+    hand the bytes back to be written once every segment had arrived. With a
+    segment size of total/16 that put the WHOLE file in RAM (2.14 GB for
+    t3_mtl23ls_v2, plus the copies that `+=` makes), which is a plausible way
+    to have a remote ComfyUI killed while it downloads, and is certainly a way
+    to make a shared machine swap. Each task opens its own handle: POSIX is
+    happy with concurrent writes to disjoint ranges, so no lock is needed and
+    the peak is one chunk per connection.
+    """
     if not AIOHTTP_AVAILABLE:
         raise ImportError("aiohttp not available")
-        
+    if not AIOFILES_AVAILABLE:
+        raise ImportError("aiofiles not available")
+    if not part_path:
+        raise ValueError("fetch_async_segment needs the part file to write into")
+
     headers = {'Range': f'bytes={start}-{end}'}
-    
+
     async with session.get(url, headers=headers) as response:
         if response.status not in [206, 200]:
             raise Exception(f"HTTP {response.status}")
-            
-        segment_data = b''
-        async for chunk in response.content.iter_chunked(8192):
-            segment_data += chunk
-            if progress_callback:
-                progress_callback(len(chunk))
-        
-        return segment_id, segment_data
+
+        async with aiofiles.open(part_path, 'r+b') as f:
+            await f.seek(start)
+            async for chunk in response.content.iter_chunked(8192):
+                await f.write(chunk)
+                if progress_callback:
+                    progress_callback(len(chunk))
+
+        return segment_id
 
 
 class AsyncParallelDownloader:
@@ -536,38 +553,75 @@ class AsyncParallelDownloader:
                     if self.progress_callback:
                         self.progress_callback(self.downloaded_bytes, self.total_size)
                 
+                # A PART FILE, NEVER THE DESTINATION, AND NEVER SPARSE AT THE
+                # DESTINATION. Writing at offsets means the file reaches full
+                # size immediately, and `download_file` decides a download is
+                # complete by comparing the size on disk with the expected
+                # one — so a preallocated destination would announce a
+                # half-downloaded weight as finished. The part file carries
+                # that risk instead, and only a completed download is renamed
+                # into place.
+                part_path = f"{self.file_path}.part"
+                os.makedirs(os.path.dirname(part_path) or ".", exist_ok=True)
+                async with aiofiles.open(part_path, 'wb') as prealloc:
+                    await prealloc.truncate(self.total_size)
+
                 # Download all segments concurrently
                 tasks = [
-                    fetch_async_segment(session, self.url, start, end, seg_id, progress_update)
+                    fetch_async_segment(session, self.url, start, end, seg_id, progress_update, part_path)
                     for seg_id, start, end in segments
                 ]
                 
                 segment_results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Check for failures and collect error details
-                segment_data = {}
-                failed_segments = []
-                for result in segment_results:
-                    if isinstance(result, Exception):
-                        failed_segments.append(str(result))
-                    else:
-                        seg_id, data = result
-                        segment_data[seg_id] = data
-                
+
+                failed_segments = [str(r) for r in segment_results if isinstance(r, BaseException)]
                 if failed_segments:
+                    # HAND WHAT LANDED TO THE RESUME PATH, WHICH ALREADY EXISTS.
+                    #
+                    # Segments finish out of order, so a part file with a hole
+                    # in the middle is not a resumable prefix — but the
+                    # segments BEFORE the first failure are one, and a single
+                    # ordered stream can carry on from there. Truncating to
+                    # that boundary is what turns a died-at-18% download into
+                    # 18% already done, instead of starting from zero on every
+                    # retry (which is what a downloader that only wrote at the
+                    # end could never avoid).
+                    completed = {
+                        idx for idx, r in enumerate(segment_results)
+                        if not isinstance(r, BaseException)
+                    }
+                    prefix = 0
+                    for seg_id, seg_start, seg_end in segments:
+                        if seg_id not in completed:
+                            break
+                        prefix = seg_end + 1
+                    try:
+                        if prefix > 0:
+                            with open(part_path, 'r+b') as trim:
+                                trim.truncate(prefix)
+                            os.replace(part_path, self.file_path)
+                            print(
+                                f"[ANYMATIX DOWNLOAD] Keeping the {prefix} bytes that landed; "
+                                f"a single stream can resume from there"
+                            )
+                        elif os.path.exists(part_path):
+                            os.remove(part_path)
+                    except Exception as salvage_error:
+                        print(f"[ANYMATIX DOWNLOAD] Could not keep the partial download: {salvage_error}")
+
                     error_summary = "; ".join(failed_segments[:3])
                     if len(failed_segments) > 3:
                         error_summary += f" and {len(failed_segments) - 3} more async segment errors"
                     raise Exception(f"Async parallel download failed: {error_summary}")
-                
-                # Assemble file
-                try:
-                    async with aiofiles.open(self.file_path, 'wb') as f:
-                        for i in range(len(segments)):
-                            await f.write(segment_data[i])
-                except Exception as e:
-                    raise Exception(f"Failed to write assembled async segments to file: {e}") from e
-                
+
+                # Nothing to assemble: every segment wrote its own range.
+                written = os.path.getsize(part_path)
+                if written != self.total_size:
+                    raise Exception(
+                        f"Async parallel download wrote {written} bytes, expected {self.total_size}"
+                    )
+                os.replace(part_path, self.file_path)
+
                 if progress_bar:
                     progress_bar.close()
                 return True
@@ -578,6 +632,14 @@ class AsyncParallelDownloader:
                     progress_bar.close()
                 except:
                     pass
+            # A part file still here was not salvageable: its holes are in the
+            # middle, so it is neither a resumable prefix nor a download.
+            try:
+                stale = f"{self.file_path}.part"
+                if os.path.exists(stale):
+                    os.remove(stale)
+            except Exception:
+                pass
             # Re-raise exception to propagate to node
             raise Exception(f"Async parallel download failed: {e}") from e
 
@@ -959,6 +1021,16 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         # SINGLE-STREAM FALLBACK — also the resume path: one ordered stream from
         # the byte we stopped at, which segments cannot express.
         if not parallel_success:
+            # The parallel attempt may have left a resumable prefix behind (see
+            # AsyncParallelDownloader), and `local_file_size` was measured
+            # before it ran. Without re-reading it here the fallback opens the
+            # file 'wb' and truncates exactly the bytes we just kept.
+            if os.path.exists(file_path):
+                salvaged = os.path.getsize(file_path)
+                if salvaged > local_file_size:
+                    print(f"[ANYMATIX DOWNLOAD] Resuming from the {salvaged} bytes the parallel attempt left")
+                    local_file_size = salvaged
+                    downloaded_size = salvaged
             print(f"[ANYMATIX DOWNLOAD] Using single-stream download for {data['file_name']}")
             single_stream_exception = None
             try:
