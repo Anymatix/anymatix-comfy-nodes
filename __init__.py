@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import datetime
 from .expunge import *
 import json
 from typing import Dict
@@ -11,7 +12,6 @@ import re
 import hashlib
 import time
 import socket
-import signal
 import threading
 import time
 from server import PromptServer
@@ -206,19 +206,126 @@ async def anymatix_host_compute_metrics(_request):
 # the interpreter keeps scheduling while heavy work runs.
 #
 # The aiohttp route stays, unchanged, for clients that only have the one port.
+def _lifecycle_journal_path() -> str:
+    """Where a death can still be read after the body is gone.
+
+    THE EVIDENCE MUST OUTLIVE THE PROCESS THAT PRODUCES IT.
+
+    Everything `_end_container` used to say went to stdout, i.e. to the log of
+    a process about to be SIGKILLed inside a container about to be replaced.
+    On 2026-08-27 a pod sat billing for nothing and the only way to reconstruct
+    why was mtimes and `ps -o lstart` — the shutdown itself had left no record
+    at all, so "the stop was refused" and "the stop was never attempted" looked
+    identical from outside.
+
+    `/workspace` is the network volume: it survives a container restart AND a
+    pod stop, which is exactly the span this file has to bridge. Falling back
+    to the install dir keeps local runs working, where nothing is lost anyway.
+    """
+    for base in ("/workspace", os.path.dirname(os.path.dirname(os.path.dirname(__file__)))):
+        try:
+            d = os.path.join(base, ".anymatix")
+            os.makedirs(d, exist_ok=True)
+            return os.path.join(d, "lifecycle.jsonl")
+        except Exception:
+            continue
+    return ""
+
+
+def _journal(event: str, **fields) -> None:
+    """One JSON line per lifecycle event, flushed and fsynced before we move on.
+
+    fsync is not superstition here: the next statement may be the one that ends
+    the process, and a line still sitting in a page cache is a line that never
+    happened.
+    """
+    record = {
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "event": event,
+        "pod": os.environ.get("RUNPOD_POD_ID", "") or None,
+        "pid": os.getpid(),
+        **fields,
+    }
+    line = json.dumps(record, default=str)
+    print(f"anymatix-lifecycle: {line}")
+    path = _lifecycle_journal_path()
+    if not path:
+        return
+    try:
+        # Bounded: a pod that flaps must not fill the volume with its own diary.
+        if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+            os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception as e:
+        print(f"anymatix: could not write lifecycle journal ({e})")
+
+
+def _runpod_pod_action(pod_id: str, api_key: str, action: str) -> tuple[int, str]:
+    """POST the stop/terminate and return what RunPod actually said."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://api.runpod.io/v2/pods/{pod_id}/action",
+        data=json.dumps({"action": action}).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read(2000).decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(2000).decode(errors="replace")
+    except Exception as e:
+        return 0, f"{type(e).__name__}: {e}"
+
+
+# How long we keep asking. RunPod normally pulls the plug in seconds; this is
+# the horizon after which continuing to ask is not going to help either.
+_STOP_RETRY_SECONDS = 20 * 60
+_STOP_RETRY_INTERVAL = 30
+
+
 def _end_container(reason: str) -> None:
     """End the whole pod, not just this process.
 
-    THE PROCESS DYING IS NOT THE POINT — THE BILL STOPPING IS.
-    `os._exit(1)` ended ComfyUI and left the container up, so a pod whose app
-    had gone away kept charging with nothing running inside it. That is the
-    shape of the failure that left one pod up overnight.
+    THE PROCESS DYING IS NOT THE POINT — THE BILL STOPPING IS. And on a Pod,
+    the ONLY thing that stops the bill is the API. That is the correction this
+    function is built around, paid for on 2026-08-27.
+
+    The previous version called the API, waited five seconds, and then killed
+    PID 1 regardless — "whether or not the API answered, stop costing money".
+    That reasoning holds for a container you own and is false for a RunPod Pod:
+    killing PID 1 does not stop the pod, it makes RunPod BUILD A NEW CONTAINER.
+    The bill continues, and the new container comes up without ComfyUI (the app
+    starts it over ssh), so the replacement has no heartbeat watchdog in it —
+    the kill destroys the only mechanism that could ever have ended the
+    machine. Measured: container killed 05:49:54, recreated 05:59:14 on the
+    same overlay (the container disk still held the pre-death logs, so the pod
+    had never stopped), then RUNNING and billing with no python process on it.
+
+    So the escalation is gone. We ask, we record what we were told, and we keep
+    asking. A process that is still alive is a process that can still ask —
+    that is worth more than a dramatic exit.
 
     ANYMATIX_ONDISCONNECT decides stop vs terminate, the same setting the app
-    already exposes; a key is used when one is present because only the API can
-    truly terminate, and without one ending the container is the honest best.
+    already exposes.
     """
-    print(f"anymatix: {reason} - ending container")
+    action = "terminate" if os.environ.get("ANYMATIX_ONDISCONNECT", "stop").strip() == "terminate" else "stop"
+    pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
+    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    in_container = os.path.exists("/.dockerenv")
+    _journal(
+        "end-requested",
+        reason=reason,
+        action=action,
+        in_container=in_container,
+        has_pod_id=bool(pod_id),
+        has_api_key=bool(api_key),
+    )
+
     # Durability first: stopping wipes the container disk, and a cache→volume
     # mirror still in flight there is a download paid for and lost — the
     # redownload-after-reboot bug. This is the one stop we initiate ourselves,
@@ -229,40 +336,51 @@ def _end_container(reason: str) -> None:
         drain_mirror_threads()
     except Exception as e:
         print(f"anymatix: mirror drain skipped ({e})")
-    action = os.environ.get("ANYMATIX_ONDISCONNECT", "stop").strip()
-    pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
-    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
-    # NOT IN A CONTAINER: exiting the process IS stopping the machine. The
-    # escalation below (signal PID 1, then SIGKILL the process group) is for a
-    # pod, where the namespace dying is what stops the bill. On somebody's
-    # desktop, PID 1 is their init and -1 is EVERY PROCESS THEY OWN.
-    if not pod_id and not os.path.exists("/.dockerenv"):
+
+    # NOT IN A CONTAINER: exiting the process IS stopping the machine, and
+    # there is no bill to stop. On somebody's desktop PID 1 is their init, so
+    # none of the pod handling below may run here.
+    if not pod_id and not in_container:
+        _journal("end-local", note="not a pod — exiting the process")
         os._exit(0)
-    if pod_id and api_key:
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                f"https://api.runpod.io/v2/pods/{pod_id}/action",
-                data=json.dumps({"action": "terminate" if action == "terminate" else "stop"}).encode(),
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=10).read()
-            print("anymatix: pod action accepted")
-        except Exception as e:
-            print(f"anymatix: pod action failed ({e}); ending container instead")
-    # Whether or not the API answered, stop costing money for a machine with
-    # nothing running on it. Killing PID 1 may be ignored by the kernel, so the
-    # namespace goes last and takes this process with it.
-    try:
-        os.kill(1, signal.SIGTERM)
-        time.sleep(5)
-    except Exception:
-        pass
-    try:
-        os.kill(-1, signal.SIGKILL)
-    except Exception:
-        pass
+
+    if not (pod_id and api_key):
+        # Nothing here can stop the bill: only the API can, and we have no way
+        # to call it. Say so where it will still be readable, and go quietly —
+        # killing PID 1 would only buy a fresh container with no watchdog.
+        _journal(
+            "end-impossible",
+            note="no RUNPOD_POD_ID/RUNPOD_API_KEY in this pod's environment — "
+                 "nothing in here can stop the bill; the app must stop the pod",
+        )
+        os._exit(1)
+
+    deadline = time.time() + _STOP_RETRY_SECONDS
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        status, body = _runpod_pod_action(pod_id, api_key, action)
+        accepted = 200 <= status < 300
+        _journal(
+            "stop-requested",
+            attempt=attempt,
+            action=action,
+            http_status=status,
+            response=body[:500],
+            accepted=accepted,
+        )
+        # Accepted or refused, the answer is the same: wait, then ask again.
+        # If it was accepted the platform is about to end us and this loop
+        # simply never gets another turn — and if it does, that IS the finding,
+        # recorded above with RunPod's own words next to it.
+        time.sleep(_STOP_RETRY_INTERVAL)
+
+    _journal(
+        "stop-gave-up",
+        attempts=attempt,
+        waited_seconds=_STOP_RETRY_SECONDS,
+        note="RunPod never stopped this pod after repeated accepted requests",
+    )
     os._exit(1)
 
 
@@ -340,6 +458,15 @@ def _start_heartbeat_side_channel() -> None:
 
 
 _start_heartbeat_side_channel()
+
+# THE LINE THAT MAKES A RESTART VISIBLE.
+#
+# A container that is killed and rebuilt looks, from the outside, exactly like
+# one that was never stopped — same pod id, same volume, and (because a restart
+# does not wipe the container disk) the same files carrying the same
+# timestamps. The pair `end-requested` … `boot` in one journal is what tells
+# the two apart, and it is the pair that was missing on 2026-08-27.
+_journal("boot", host=socket.gethostname())
 
 
 @routes.post('/anymatix/heartbeat')
