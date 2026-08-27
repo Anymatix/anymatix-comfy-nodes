@@ -310,7 +310,7 @@ def _journal(event: str, **fields) -> None:
         print(f"anymatix: could not write lifecycle journal ({e})")
 
 
-def _runpodctl_stop(pod_id: str, action: str) -> tuple[bool, str]:
+def _runpodctl_stop(pod_id: str, action: str, api_key: str = "") -> tuple[bool, str]:
     """Ask RunPod's own CLI, which every pod carries with a pod-scoped key.
 
     PREFERRED OVER OUR HTTP CALL, for one reason: the credential.
@@ -323,16 +323,33 @@ def _runpodctl_stop(pod_id: str, action: str) -> tuple[bool, str]:
 
     RunPod's own documentation names this exact case: a container that has
     finished its work and must not be restarted by the platform.
+
+    NOT A DEPENDENCY WE OWN. It comes from the base image
+    (`runpod/pytorch:...`); neither the Anymatix Dockerfile nor bootstrap.py
+    installs it, and the app never invokes it at all. Hence the `which` guard
+    and the HTTP fallback: a base image without it must degrade, not break.
+
+    THE ENVIRONMENT IS PASSED EXPLICITLY, and that is not a detail. A
+    subprocess inherits OUR environment, and ours is the one that started this
+    whole investigation: ComfyUI is launched over ssh and has no
+    RUNPOD_API_KEY. Letting runpodctl inherit it would have reproduced the
+    exact bug on a second road — a stop that looks attempted and cannot
+    authenticate.
     """
     import shutil
     import subprocess
     if not shutil.which("runpodctl"):
         return False, "runpodctl not installed"
     verb = "remove" if action == "terminate" else "stop"
+    env = dict(os.environ)
+    if api_key:
+        env["RUNPOD_API_KEY"] = api_key
+    if pod_id:
+        env["RUNPOD_POD_ID"] = pod_id
     try:
         proc = subprocess.run(
             ["runpodctl", verb, "pod", pod_id],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=env,
         )
         detail = ((proc.stdout or "") + (proc.stderr or "")).strip()[:500]
         return proc.returncode == 0, detail or f"exit {proc.returncode}"
@@ -435,7 +452,7 @@ def _end_container(reason: str) -> None:
         attempt += 1
         # runpodctl first: its key is provisioned by RunPod and scoped to this
         # pod, so it works even when ours never made it into the environment.
-        ok, detail = _runpodctl_stop(pod_id, action)
+        ok, detail = _runpodctl_stop(pod_id, action, api_key)
         _journal("stop-requested", attempt=attempt, action=action,
                  via="runpodctl", accepted=ok, response=detail)
         if not ok and api_key:
