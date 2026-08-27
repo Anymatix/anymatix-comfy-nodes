@@ -263,6 +263,36 @@ def _journal(event: str, **fields) -> None:
         print(f"anymatix: could not write lifecycle journal ({e})")
 
 
+def _runpodctl_stop(pod_id: str, action: str) -> tuple[bool, str]:
+    """Ask RunPod's own CLI, which every pod carries with a pod-scoped key.
+
+    PREFERRED OVER OUR HTTP CALL, for one reason: the credential.
+
+    `runpodctl` is installed on every pod by RunPod itself, already
+    authenticated with a key scoped to that pod — nothing for us to inject and
+    nothing to get wrong. Our HTTP path depends on RUNPOD_API_KEY reaching the
+    container's environment correctly, and when it does not there is literally
+    nothing inside the machine that can stop the bill.
+
+    RunPod's own documentation names this exact case: a container that has
+    finished its work and must not be restarted by the platform.
+    """
+    import shutil
+    import subprocess
+    if not shutil.which("runpodctl"):
+        return False, "runpodctl not installed"
+    verb = "remove" if action == "terminate" else "stop"
+    try:
+        proc = subprocess.run(
+            ["runpodctl", verb, "pod", pod_id],
+            capture_output=True, text=True, timeout=30,
+        )
+        detail = ((proc.stdout or "") + (proc.stderr or "")).strip()[:500]
+        return proc.returncode == 0, detail or f"exit {proc.returncode}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def _runpod_pod_action(pod_id: str, api_key: str, action: str) -> tuple[int, str]:
     """POST the stop/terminate and return what RunPod actually said."""
     import urllib.error
@@ -344,14 +374,11 @@ def _end_container(reason: str) -> None:
         _journal("end-local", note="not a pod — exiting the process")
         os._exit(0)
 
-    if not (pod_id and api_key):
-        # Nothing here can stop the bill: only the API can, and we have no way
-        # to call it. Say so where it will still be readable, and go quietly —
-        # killing PID 1 would only buy a fresh container with no watchdog.
+    if not pod_id:
         _journal(
             "end-impossible",
-            note="no RUNPOD_POD_ID/RUNPOD_API_KEY in this pod's environment — "
-                 "nothing in here can stop the bill; the app must stop the pod",
+            note="no RUNPOD_POD_ID in this pod's environment — nothing in here "
+                 "can stop the bill; the app must stop the pod",
         )
         os._exit(1)
 
@@ -359,16 +386,19 @@ def _end_container(reason: str) -> None:
     attempt = 0
     while time.time() < deadline:
         attempt += 1
-        status, body = _runpod_pod_action(pod_id, api_key, action)
-        accepted = 200 <= status < 300
-        _journal(
-            "stop-requested",
-            attempt=attempt,
-            action=action,
-            http_status=status,
-            response=body[:500],
-            accepted=accepted,
-        )
+        # runpodctl first: its key is provisioned by RunPod and scoped to this
+        # pod, so it works even when ours never made it into the environment.
+        ok, detail = _runpodctl_stop(pod_id, action)
+        _journal("stop-requested", attempt=attempt, action=action,
+                 via="runpodctl", accepted=ok, response=detail)
+        if not ok and api_key:
+            status, body = _runpod_pod_action(pod_id, api_key, action)
+            _journal("stop-requested", attempt=attempt, action=action,
+                     via="api", http_status=status, response=body[:500],
+                     accepted=200 <= status < 300)
+        elif not ok:
+            _journal("stop-fallback-unavailable",
+                     note="runpodctl failed and RUNPOD_API_KEY is not set")
         # Accepted or refused, the answer is the same: wait, then ask again.
         # If it was accepted the platform is about to end us and this loop
         # simply never gets another turn — and if it does, that IS the finding,
