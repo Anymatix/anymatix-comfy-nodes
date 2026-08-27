@@ -206,6 +206,53 @@ async def anymatix_host_compute_metrics(_request):
 # the interpreter keeps scheduling while heavy work runs.
 #
 # The aiohttp route stays, unchanged, for clients that only have the one port.
+def _pod_env(name: str, default: str = "") -> str:
+    """Read a pod-level variable that our own process was never given.
+
+    THE STOP WAS NEVER ATTEMPTED. THAT IS THE WHOLE BUG.
+
+    RunPod injects RUNPOD_POD_ID and RUNPOD_API_KEY into the CONTAINER's init
+    process. ComfyUI is not started by that init — the app launches it over an
+    ssh session, and an ssh session does not inherit the container's
+    environment. Measured 2026-08-27 on pod nvns4tlck1dpwk: `/proc/1/environ`
+    carries RUNPOD_POD_ID, RUNPOD_API_KEY and ANYMATIX_ONDISCONNECT, and the
+    ComfyUI process has none of the three.
+
+    So `if pod_id and api_key:` was always false, the stop request was never
+    even sent, and control fell straight through to the `kill(1)` that made
+    RunPod rebuild the container. Every "the API must have been refused" theory
+    was looking for a failure that never happened, because nothing was ever
+    asked.
+
+    PID 1's environment is the honest source, with RunPod's own
+    /etc/rp_environment as the backstop — that file is how the platform makes
+    the same values available to shells that did not inherit them.
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    try:
+        with open("/proc/1/environ", "rb") as fh:
+            for entry in fh.read().split(b"\0"):
+                key, _, val = entry.decode(errors="replace").partition("=")
+                if key == name and val.strip():
+                    return val.strip()
+    except Exception:
+        pass
+    try:
+        with open("/etc/rp_environment", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                key, _, val = line.partition("=")
+                if key.strip() == name:
+                    return val.strip().strip("\"'")
+    except Exception:
+        pass
+    return default
+
+
 def _lifecycle_journal_path() -> str:
     """Where a death can still be read after the body is gone.
 
@@ -242,7 +289,7 @@ def _journal(event: str, **fields) -> None:
     record = {
         "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "event": event,
-        "pod": os.environ.get("RUNPOD_POD_ID", "") or None,
+        "pod": _pod_env("RUNPOD_POD_ID") or None,
         "pid": os.getpid(),
         **fields,
     }
@@ -343,9 +390,9 @@ def _end_container(reason: str) -> None:
     ANYMATIX_ONDISCONNECT decides stop vs terminate, the same setting the app
     already exposes.
     """
-    action = "terminate" if os.environ.get("ANYMATIX_ONDISCONNECT", "stop").strip() == "terminate" else "stop"
-    pod_id = os.environ.get("RUNPOD_POD_ID", "").strip()
-    api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    action = "terminate" if _pod_env("ANYMATIX_ONDISCONNECT", "stop") == "terminate" else "stop"
+    pod_id = _pod_env("RUNPOD_POD_ID")
+    api_key = _pod_env("RUNPOD_API_KEY")
     in_container = os.path.exists("/.dockerenv")
     _journal(
         "end-requested",
