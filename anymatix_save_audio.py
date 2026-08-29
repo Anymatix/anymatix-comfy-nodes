@@ -3,6 +3,8 @@ import io
 import av
 import folder_paths
 
+from anymatix_output_formats import AUDIO_FORMATS, audio_format
+
 
 class AnymatixSaveAudio:
     def __init__(self):
@@ -19,8 +21,16 @@ class AnymatixSaveAudio:
                     {"default": "anymatix/results", "multiline": False},
                 ),
                 "filename_prefix": ("STRING", {"default": "audio"}),
+            },
+            # Optional for the same reason as the image node's: every address
+            # already computed asks for a save with no `format`, and MP3 is
+            # what it has always meant. `quality` is a bit rate, which is a
+            # thing only the lossy codecs have — WAV and FLAC have none to
+            # state and are not made to invent one.
+            "optional": {
+                "format": (list(AUDIO_FORMATS.keys()), {"default": "mp3"}),
                 "quality": (["320k", "256k", "192k", "128k", "V0"], {"default": "320k"}),
-            }
+            },
         }
 
     RETURN_TYPES = ()
@@ -36,6 +46,7 @@ class AnymatixSaveAudio:
         output_path="anymatix/results",
         filename_prefix="audio",
         quality="320k",
+        format="mp3",
     ):
         # Handle None audio (e.g., from videos without audio tracks)
         if audio is None or (isinstance(audio, dict) and audio.get("waveform") is None):
@@ -49,56 +60,68 @@ class AnymatixSaveAudio:
 
         results = []
 
+        # WHAT THE RUNG MEANS IN BYTES lives in `anymatix_output_formats`, so
+        # that the extension the renderer derives from the type and the one
+        # written here come from one table. MP3 stays the default: a card that
+        # never chose a format keeps the file name it has always had.
+        spec = audio_format(format)
+        extension = spec["extension"]
+
         for batch_number, waveform in enumerate(audio["waveform"].cpu()):
-            file = f"{filename_prefix}.mp3"
+            file = f"{filename_prefix}.{extension}"
             output_file = os.path.abspath(os.path.join(full_output_path, file))
 
             sample_rate = audio["sample_rate"]
 
             try:
-                # Create output with MP3 format
                 output_buffer = io.BytesIO()
-                output_container = av.open(output_buffer, mode='w', format='mp3')
+                output_container = av.open(
+                    output_buffer, mode="w", format=spec["container"]
+                )
 
-                layout = 'mono' if waveform.shape[0] == 1 else 'stereo'
-                out_stream = output_container.add_stream("libmp3lame", rate=sample_rate, layout=layout)
+                layout = "mono" if waveform.shape[0] == 1 else "stereo"
+                stream_rate = spec.get("sample_rate", sample_rate)
+                out_stream = output_container.add_stream(
+                    spec["codec"], rate=stream_rate, layout=layout
+                )
+                if "sample_fmt" in spec:
+                    out_stream.format = spec["sample_fmt"]
 
-                # Set quality/bitrate
-                if quality == "V0":
-                    out_stream.codec_context.qscale = 1
-                elif quality == "128k":
-                    out_stream.bit_rate = 128000
-                elif quality == "192k":
-                    out_stream.bit_rate = 192000
-                elif quality == "256k":
+                # Only the lossy codecs have a bit rate to argue about.
+                if spec["codec"] == "libmp3lame":
+                    if quality == "V0":
+                        out_stream.codec_context.qscale = 1
+                    else:
+                        out_stream.bit_rate = int(quality.rstrip("k")) * 1000
+                elif spec["codec"] == "aac":
                     out_stream.bit_rate = 256000
-                elif quality == "320k":
-                    out_stream.bit_rate = 320000
 
                 frame = av.AudioFrame.from_ndarray(
                     waveform.movedim(0, 1).reshape(1, -1).float().numpy(),
-                    format='flt',
-                    layout=layout
+                    format="flt",
+                    layout=layout,
                 )
                 frame.sample_rate = sample_rate
                 frame.pts = 0
-                output_container.mux(out_stream.encode(frame))
 
-                # Flush encoder
-                output_container.mux(out_stream.encode(None))
+                # A codec whose rate differs from the source needs the frames
+                # resampled; PyAV does that when the stream is asked to encode
+                # a frame whose rate does not match, via its own resampler.
+                for packet in out_stream.encode(frame):
+                    output_container.mux(packet)
+                for packet in out_stream.encode(None):
+                    output_container.mux(packet)
 
-                # Close container
                 output_container.close()
 
                 # Write the output to file and fsync so it is visible to the
                 # serving layer immediately after execution_success.
                 output_buffer.seek(0)
-                with open(output_file, 'wb') as f:
+                with open(output_file, "wb") as f:
                     f.write(output_buffer.getbuffer())
                     f.flush()
                     os.fsync(f.fileno())
 
-                # Verify output
                 if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
                     print(f"Error: Audio output {output_file} was not created or is empty")
                     return {"ui": {"audio": []}}

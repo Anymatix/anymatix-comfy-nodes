@@ -6,6 +6,13 @@ import tempfile
 import shutil
 import sys
 
+from anymatix_output_formats import (
+    VIDEO_PRESETS,
+    video_allows_hardware_encoder,
+    video_codec_args,
+    video_container,
+)
+
 # Dev/instrumentation: one tag for grepping ComfyUI logs
 _DBG = "[ANYMATIX_SAVE_MP4]"
 
@@ -73,30 +80,32 @@ def list_available_encoders(ffmpeg_exe):
         return ""
 
 
-def get_video_encoder_candidates(ffmpeg_exe, preset):
-    encoders_output = list_available_encoders(ffmpeg_exe)
+def get_video_encoder_candidates(ffmpeg_exe, quality):
+    """
+    The encoders to try, in order, for this rung.
+
+    A hardware H.264 encoder is worth trying first because it writes H.264 —
+    the same codec the rung names. It is NOT offered for a master rung: a
+    ProRes 4444 address whose file is h264_videotoolbox would be the defect
+    this whole specification exists to remove, and it would be invisible.
+    """
+    codec_args = video_codec_args(quality)
     candidates = []
 
-    if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders_output:
-        candidates.append({
-            'name': 'h264_videotoolbox',
-            'args': [
-                '-c:v', 'h264_videotoolbox',
-                '-b:v', '12M',
-                '-maxrate', '18M',
-                '-bufsize', '24M'
-            ]
-        })
+    if video_allows_hardware_encoder(quality):
+        encoders_output = list_available_encoders(ffmpeg_exe)
+        if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders_output:
+            candidates.append({
+                'name': 'h264_videotoolbox',
+                'args': [
+                    '-c:v', 'h264_videotoolbox',
+                    '-b:v', '12M',
+                    '-maxrate', '18M',
+                    '-bufsize', '24M'
+                ]
+            })
 
-    candidates.append({
-        'name': preset['codec'],
-        'args': [
-            '-c:v', preset['codec'],
-            '-profile:v', preset['profile'],
-            '-level', preset['level'],
-            '-crf', preset['crf']
-        ]
-    })
+    candidates.append({'name': codec_args[1], 'args': codec_args})
 
     return candidates
 
@@ -112,44 +121,11 @@ class AnymatixSaveAnimatedMP4:
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
 
-    # Codec options for different quality/compatibility tradeoffs
-    codec_presets = {
-        "web_compatible": {
-            "codec": "libx264", 
-            "profile": "baseline", 
-            "level": "3.0",
-            "pix_fmt": "yuv420p",
-            "crf": "23"
-        },
-        "high_quality": {
-            "codec": "libx264", 
-            "profile": "high", 
-            "level": "4.0",
-            "pix_fmt": "yuv420p",
-            "crf": "18"
-        },
-        "fast_encode": {
-            "codec": "libx264", 
-            "profile": "baseline", 
-            "level": "3.0",
-            "pix_fmt": "yuv420p",
-            "crf": "28",
-            "preset": "ultrafast"
-        },
-        "high quality": {
-            "codec": "libx264",
-            "profile": "high",
-            "level": "4.0", 
-            "pix_fmt": "yuv420p",
-            "crf": "15",  # Very high quality for client-side processing
-            "preset": "slow",  # Better compression
-            "keyint": "24",  # GOP size of 24 frames (1 second at 24fps)
-            "min_keyint": "12",  # Minimum keyframe interval
-            "sc_threshold": "0",  # Disable scene change detection for consistent GOP
-            "g": "24"  # Explicit GOP size
-        }
-    }
-    
+    # Every rung this node can write, and what each is in ffmpeg's words:
+    # `anymatix_output_formats.VIDEO_PRESETS`. It is shared with nothing else
+    # today, and it is out here so that a test can read it without ComfyUI.
+    codec_presets = VIDEO_PRESETS
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -203,7 +179,10 @@ class AnymatixSaveAnimatedMP4:
             _save_mp4_dbg("RETURN", "path=EARLY_NO_FFMPEG ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
             
-        preset = self.codec_presets.get(quality, self.codec_presets["web_compatible"])
+        # An unknown rung is a bug upstream, not a reason to write something
+        # else: the address already says which rung this is.
+        preset = VIDEO_PRESETS[quality]
+        container = video_container(quality)
         
         # Create output directory (output_path is the hash subdirectory)
         full_output_path = os.path.join(folder_paths.get_output_directory(), output_path)
@@ -221,16 +200,19 @@ class AnymatixSaveAnimatedMP4:
             _save_mp4_dbg("RETURN", "path=EARLY_NO_FRAMES ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
         
-        # Prepare filename
-        if not filename_prefix.endswith('.mp4'):
-            filename = f"{filename_prefix}.mp4"
-        else:
+        # Prepare filename. THE EXTENSION IS THE RUNG'S: ProRes and DNxHR are
+        # QuickTime, FFV1 is Matroska, and the renderer works out the same
+        # extension from the type it declared. A file at an address nobody
+        # asks for is the same as no file at all.
+        if filename_prefix.endswith(f'.{container}'):
             filename = filename_prefix
-        
+        else:
+            filename = f"{filename_prefix}.{container}"
+
         file_path = os.path.join(full_output_path, filename)
         temp_file_path = os.path.join(
             full_output_path,
-            f".{filename}.tmp-{os.getpid()}.mp4"
+            f".{filename}.tmp-{os.getpid()}.{container}"
         )
         _save_mp4_dbg(
             "PATHS",
@@ -322,7 +304,7 @@ class AnymatixSaveAnimatedMP4:
                 f"audio_sec={_audio_sec} audio_path={audio_file_path!r} "
                 f"note=no_shortest_mux_ends_when_rawvideo_stdin_EOF",
             )
-            _cands = get_video_encoder_candidates(FFMPEG_EXE, preset)
+            _cands = get_video_encoder_candidates(FFMPEG_EXE, quality)
             _save_mp4_dbg("ENCODER_LIST", f"candidates={[c['name'] for c in _cands]!r}")
 
             for encoder_candidate in _cands:
@@ -345,8 +327,11 @@ class AnymatixSaveAnimatedMP4:
                     '-pix_fmt', preset['pix_fmt'],
                     '-fps_mode', 'cfr',
                     '-r', str(fps),
-                    '-movflags', '+faststart',
                 ])
+                # `-movflags` belongs to the mov/mp4 muxer. Matroska refuses an
+                # option it does not know and the whole encode fails.
+                if container in ('mp4', 'mov'):
+                    ffmpeg_cmd.extend(['-movflags', '+faststart'])
 
                 ffmpeg_cmd.extend(encoder_candidate['args'])
 
@@ -355,18 +340,27 @@ class AnymatixSaveAnimatedMP4:
                 # stream ends (often audio first) while Python is still piping frames ->
                 # BrokenPipeError on stdin even though stderr shows encoder progress.
                 if audio_file_path is not None:
-                    ffmpeg_cmd.extend([
-                        '-c:a', 'aac',
-                        '-b:a', '192k',
-                    ])
+                    # A master rung's audio is not thrown away either: ProRes
+                    # in a mov carries PCM, FFV1 in a mkv carries FLAC, and
+                    # only the delivery rungs get AAC.
+                    if preset['codec'] == 'prores_ks' or preset['codec'] == 'dnxhd':
+                        ffmpeg_cmd.extend(['-c:a', 'pcm_s16le'])
+                    elif preset['codec'] == 'ffv1':
+                        ffmpeg_cmd.extend(['-c:a', 'flac'])
+                    else:
+                        ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
 
-                gop = str(max(12, int(round(fps * 2))))
-                keyint_min = str(max(12, int(round(fps))))
-                ffmpeg_cmd.extend([
-                    '-g', preset.get('g', gop),
-                    '-keyint_min', preset.get('min_keyint', keyint_min),
-                    '-sc_threshold', preset.get('sc_threshold', '0'),
-                ])
+                # The rungs state their own GOP inside `extra` — FFV1 wants
+                # every frame a keyframe — so this derived one is only for the
+                # four presets that predate rungs and would otherwise change.
+                if 'extra' not in preset:
+                    gop = str(max(12, int(round(fps * 2))))
+                    keyint_min = str(max(12, int(round(fps))))
+                    ffmpeg_cmd.extend([
+                        '-g', preset.get('g', gop),
+                        '-keyint_min', preset.get('min_keyint', keyint_min),
+                        '-sc_threshold', preset.get('sc_threshold', '0'),
+                    ])
 
                 if encoder_candidate['name'] == preset['codec'] and 'preset' in preset:
                     ffmpeg_cmd.extend(['-preset', preset['preset']])
@@ -515,7 +509,7 @@ class AnymatixSaveAnimatedMP4:
                 file_size = os.path.getsize(file_path)
                 duration = total_frames / fps
                 audio_info = " with audio" if audio_file_path is not None else ""
-                print(f"MP4 created successfully{audio_info}!")
+                print(f"{container.upper()} created successfully{audio_info}!")
                 print(f"  File: {filename}")
                 print(f"  Size: {file_size:,} bytes")
                 print(f"  Duration: {duration:.2f} seconds")

@@ -6,7 +6,8 @@ import folder_paths
 import os
 import numpy as np
 import json
-from PIL import Image
+
+from anymatix_output_formats import IMAGE_EXTENSIONS, write_image
 
 
 class Anymatix_Image_Save:
@@ -30,13 +31,27 @@ class Anymatix_Image_Save:
                     {"default": 4, "min": 1, "max": 9, "step": 1},
                 ),
                 "filename_number_start": (["false", "true"],),
-                "extension": (["png", "jpg", "jpeg", "gif", "tiff", "webp", "bmp"],),
-                "quality": ("INT", {"default": 100, "min": 1, "max": 100, "step": 1}),
-                "lossless_webp": (["false", "true"],),
+                "extension": (IMAGE_EXTENSIONS,),
                 "overwrite_mode": (["false", "true", "prefix_as_filename"],),
                 "show_previews": (["true", "false"],),
                 "save_json": (["true", "false"]),
-            }
+            },
+            # OPTIONAL, and every one of them for a reason.
+            #
+            # `bit_depth` is new, and a required input added here would fail
+            # validation for every card that predates the rungs. `quality` and
+            # `lossless_webp` move here because they are parameters of SOME
+            # formats: a rung that writes OpenEXR has no quality to state, and
+            # made to state one anyway it would state a meaningless number that
+            # somebody would later read as meaning something.
+            "optional": {
+                # 8 unless a rung asks for more. A separate input rather than a
+                # `png16` extension, so the extension stays the file name's —
+                # which is what the renderer derives from the type.
+                "bit_depth": ("INT", {"default": 8, "min": 8, "max": 16, "step": 8}),
+                "quality": ("INT", {"default": 100, "min": 1, "max": 100, "step": 1}),
+                "lossless_webp": (["false", "true"],),
+            },
         }
 
     RETURN_TYPES = ()
@@ -60,6 +75,7 @@ class Anymatix_Image_Save:
         filename_number_start="false",
         show_previews="true",
         save_json="false",
+        bit_depth=8,
     ):
 
         delimiter = filename_delimiter
@@ -98,14 +114,16 @@ class Anymatix_Image_Save:
         else:
             counter = 1
 
-        ALLOWED_EXT = [".png", ".jpg", ".jpeg", ".gif", ".tiff", ".webp", ".bmp"]
-        # Set Extension
-        file_extension = "." + extension
-        if file_extension not in ALLOWED_EXT:
-            print(
-                f"The extension `{extension}` is not valid. The valid formats are: {', '.join(sorted(ALLOWED_EXT))}"
+        # An extension this node does not know is a bug upstream. It used to
+        # fall back to PNG — and silently, which means an address that says
+        # `webp` could hold a PNG, exactly the disagreement the format rungs
+        # exist to close.
+        if extension not in IMAGE_EXTENSIONS:
+            raise RuntimeError(
+                f"The extension `{extension}` is not one this node writes. "
+                f"Known: {', '.join(IMAGE_EXTENSIONS)}"
             )
-            file_extension = "png"
+        file_extension = "." + extension
 
         results = list()
         
@@ -131,8 +149,7 @@ class Anymatix_Image_Save:
         print(f"anymatix: saving {total_images} images to {output_path} (fast_batch={fast_batch})")
         
         for idx, image in enumerate(images):
-            i = 255.0 * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            frame = image.cpu().numpy()
 
             # Delegate the filename stuffs
             if overwrite_mode == "prefix_as_filename":
@@ -145,34 +162,18 @@ class Anymatix_Image_Save:
                 if os.path.exists(os.path.join(output_path, file)):
                     counter += 1
 
-            # Save the images
-            try:
-                output_file = os.path.abspath(os.path.join(output_path, file))
-
-                if extension in ["jpg", "jpeg"]:
-                    img.save(output_file, quality=quality, optimize=not fast_batch)
-                elif extension == "webp":
-                    img.save(output_file, quality=quality, lossless=lossless_webp)
-                elif extension == "png":
-                    # compress_level: 0=none, 1=fast, 6=default, 9=max (slowest)
-                    # For batches, use level 1 (~32x faster than level 9/optimize)
-                    img.save(output_file, compress_level=1 if fast_batch else 6)
-                elif extension == "bmp":
-                    img.save(output_file)
-                elif extension == "tiff":
-                    img.save(output_file, quality=quality, optimize=not fast_batch)
-                else:
-                    img.save(output_file, optimize=not fast_batch)
-
-                if not fast_batch:
-                    print(f"Image file saved to: {output_file}")
-
-            except OSError as e:
-                print(f"Unable to save file to: {output_file}")
-                print(e)
-            except Exception as e:
-                print("Unable to save file due to the to the following error:")
-                print(e)
+            output_file = os.path.abspath(os.path.join(output_path, file))
+            write_image(
+                frame,
+                output_file,
+                extension=extension,
+                quality=quality,
+                lossless_webp=lossless_webp,
+                bit_depth=bit_depth,
+                fast=fast_batch,
+            )
+            if not fast_batch:
+                print(f"Image file saved to: {output_file}")
 
             if overwrite_mode != "prefix_as_filename":
                 counter += 1
