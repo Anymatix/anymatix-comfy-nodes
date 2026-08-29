@@ -50,6 +50,7 @@ from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
 from .anymatix_ltx_resize import AnymatixLTXResizeToClosestValidSize
+from .anymatix_media_length import AnymatixAudioDuration, AnymatixFrameCount
 from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
 from .anymatix_save_audio import AnymatixSaveAudio
 from .anymatix_save_json import AnymatixSaveJson
@@ -73,6 +74,8 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
     "AnymatixImageToVideo": AnymatixImageToVideo,
     "AnymatixLTXResizeToClosestValidSize": AnymatixLTXResizeToClosestValidSize,
+    "AnymatixAudioDuration": AnymatixAudioDuration,
+    "AnymatixFrameCount": AnymatixFrameCount,
     "AnymatixSaveAnimatedMP4": AnymatixSaveAnimatedMP4,
     "AnymatixSaveAudio": AnymatixSaveAudio,
     "AnymatixUNETLoaderGGUF": AnymatixUNETLoaderGGUF,
@@ -113,6 +116,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
     "AnymatixImageToVideo": "Anymatix Image To Video",
     "AnymatixLTXResizeToClosestValidSize": "Anymatix LTX Resize To Closest Valid Size",
+    "AnymatixAudioDuration": "Anymatix Audio Duration",
+    "AnymatixFrameCount": "Anymatix Frame Count",
     "AnymatixSaveAnimatedMP4": "Anymatix Save Animated MP4",
     "AnymatixSaveAudio": "Anymatix Save Audio",
     "AnymatixUNETLoaderGGUF": "Anymatix UNET Loader GGUF",
