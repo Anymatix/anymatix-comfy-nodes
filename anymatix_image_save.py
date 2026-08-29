@@ -7,7 +7,7 @@ import os
 import numpy as np
 import json
 
-from anymatix_output_formats import IMAGE_EXTENSIONS, write_image
+from .anymatix_output_formats import IMAGE_EXTENSIONS, write_image
 
 
 class Anymatix_Image_Save:

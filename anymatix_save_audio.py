@@ -3,7 +3,7 @@ import io
 import av
 import folder_paths
 
-from anymatix_output_formats import AUDIO_FORMATS, audio_format
+from .anymatix_output_formats import AUDIO_FORMATS, audio_format
 
 
 class AnymatixSaveAudio:

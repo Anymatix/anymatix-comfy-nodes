@@ -6,7 +6,7 @@ import tempfile
 import shutil
 import sys
 
-from anymatix_output_formats import (
+from .anymatix_output_formats import (
     VIDEO_PRESETS,
     video_allows_hardware_encoder,
     video_codec_args,
