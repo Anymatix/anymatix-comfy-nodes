@@ -888,6 +888,47 @@ def delete_files(url, dir):
                 log.write(f"Parent directory not empty after deletion: {parent}\n")
 
 
+def part_path_for(file_path: str) -> str:
+    """
+    A DOWNLOAD IN PROGRESS MUST NOT WEAR THE NAME OF A FINISHED ONE.
+
+    This wrote straight to the model's own filename and used the bytes already
+    there as the resume offset, so an interrupted transfer left a file that
+    LOOKED like the model to everything else in the system. A beta tester found
+    `ltx-2-19b-dev-fp8.safetensors` on disk at 141 MB of a declared 27 GB —
+    0.5% — sitting there looking valid. The downloader would have resumed it
+    next time; ComfyUI, asked to load it in the meantime, fails on something
+    that has nothing to do with the real cause.
+
+    So the bytes accumulate in `<name>.part` and the final name is given only
+    when the size matches what the sidecar declares. Resume still works: it
+    resumes from the `.part`. Nothing else in the system can mistake a `.part`
+    for a model.
+    """
+    return file_path + ".part"
+
+
+def finalize_download(part: str, file_path: str, expected_size, label: str) -> str:
+    """
+    Give the `.part` its real name, and only if it earned it.
+
+    A short file KEEPS its `.part` and raises: those bytes are worth resuming
+    from, and deleting them would throw away what the download already paid
+    for. `os.replace` is atomic on the same filesystem, so no reader ever sees
+    a half-named file.
+    """
+    if not os.path.exists(part):
+        raise Exception(f"Download produced no data for {label}")
+    written = os.path.getsize(part)
+    if expected_size is not None and written != expected_size:
+        raise Exception(
+            f"Incomplete download for {label}: {written} of {expected_size} bytes. "
+            f"Kept as {os.path.basename(part)} to resume from."
+        )
+    os.replace(part, file_path)
+    return file_path
+
+
 def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None):
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library is required for downloading")
@@ -967,25 +1008,47 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     except Exception as e:
                         print(f"[WARNING] Early deduplication check failed for {item}: {e}")
         local_file_size = 0
+        part_file = part_path_for(file_path)
 
-        if data["file_size"] is not None and os.path.exists(file_path):
-            local_file_size = os.path.getsize(file_path)
-            if local_file_size == data["file_size"]:
-                return file_path
-            if local_file_size > data["file_size"]:
-                # Self-heal: a partial larger than the target is corrupt — almost
-                # always a prior resume where the server ignored our Range header and
-                # the full body got appended onto the partial. Discard and start fresh
-                # (otherwise it grows every run and never matches → re-downloads forever).
+        if data["file_size"] is not None:
+            # THE FINAL NAME MEANS FINISHED. A file wearing it whose size is not
+            # the declared one cannot be the model — under the .part scheme it
+            # can only be an artifact of the old one — so it is not resumed
+            # from, it is removed.
+            if os.path.exists(file_path):
+                on_disk = os.path.getsize(file_path)
+                if on_disk == data["file_size"]:
+                    return file_path
                 print(
-                    f"[ANYMATIX DOWNLOAD] Discarding oversized/corrupt partial for "
-                    f"{data['file_name']}: {local_file_size} > expected {data['file_size']} bytes"
+                    f"[ANYMATIX DOWNLOAD] Discarding a file with the final name and the wrong "
+                    f"size for {data['file_name']}: {on_disk} != expected {data['file_size']} bytes"
                 )
                 try:
                     os.remove(file_path)
                 except Exception:
                     pass
-                local_file_size = 0
+            if os.path.exists(part_file):
+                local_file_size = os.path.getsize(part_file)
+                if local_file_size == data["file_size"]:
+                    # It was complete and nobody renamed it — the process died
+                    # between the last byte and the rename. Finish the job.
+                    return finalize_download(
+                        part_file, file_path, data["file_size"], data["file_name"]
+                    )
+                if local_file_size > data["file_size"]:
+                    # Self-heal: a partial larger than the target is corrupt — almost
+                    # always a prior resume where the server ignored our Range header and
+                    # the full body got appended onto the partial. Discard and start fresh
+                    # (otherwise it grows every run and never matches → re-downloads forever).
+                    print(
+                        f"[ANYMATIX DOWNLOAD] Discarding oversized/corrupt partial for "
+                        f"{data['file_name']}: {local_file_size} > expected {data['file_size']} bytes"
+                    )
+                    try:
+                        os.remove(part_file)
+                    except Exception:
+                        pass
+                    local_file_size = 0
         elif data["file_size"] is None and os.path.exists(file_path) and file_path.lower().endswith(".json"):
             if is_valid_json_file(file_path):
                 return file_path
@@ -1001,16 +1064,18 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             print(f"[ANYMATIX DOWNLOAD] Attempting parallel download for {data['file_name']} ({data['file_size']} bytes)")
             try:
                 parallel_success = fetch_parallel(
-                    effective, 
-                    file_path, 
-                    callback, 
+                    effective,
+                    part_file,
+                    callback,
                     local_file_size,
                     max_connections=min(8, max(2, data["file_size"] // (10*1024*1024)))  # Adaptive connections
                 )
                 if parallel_success:
                     mb_total = data["file_size"] / (1024 * 1024) if data["file_size"] else 0
                     print(f"[ANYMATIX DOWNLOAD] Parallel download completed successfully: {data['file_name']} ({mb_total:.0f}MB)")
-                    return file_path
+                    return finalize_download(
+                        part_file, file_path, data["file_size"], data["file_name"]
+                    )
                 else:
                     print(f"[ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
@@ -1035,7 +1100,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             single_stream_exception = None
             try:
                 file_mode = 'ab' if local_file_size > 0 else 'wb'
-                with open(file_path, file_mode) as file:
+                with open(part_file, file_mode) as file:
                     progress_bar = None
                     if TQDM_AVAILABLE and data["file_size"]:
                         try:
@@ -1099,9 +1164,9 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 is_interrupt = "InterruptProcessingException" in type(e).__name__
                 if not is_interrupt:
                     try:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                            print(f"[ANYMATIX DOWNLOAD] Removed partial after failure: {file_path}")
+                        if os.path.exists(part_file):
+                            os.remove(part_file)
+                            print(f"[ANYMATIX DOWNLOAD] Removed partial after failure: {part_file}")
                     except Exception:
                         pass
 
@@ -1118,6 +1183,15 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     raise parallel_exception
                 else:
                     raise Exception(f"Both the parallel and the single-stream download failed for {data['file_name']}")
+
+        # THE RENAME, AND IT IS THE ONLY ONE.
+        #
+        # Everything above wrote into `<name>.part`. The parallel path returns
+        # through `finalize_download` itself; reaching here means the
+        # single-stream path ran, and this is where its bytes earn the model's
+        # name. A short file raises and KEEPS its `.part`, so the next run
+        # resumes instead of starting from zero.
+        finalize_download(part_file, file_path, data["file_size"], data["file_name"])
 
         # Final verification: ensure file exists and has correct size before returning
         if not os.path.exists(file_path):
