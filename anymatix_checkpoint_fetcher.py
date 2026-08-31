@@ -726,6 +726,9 @@ class AnymatixUpscaleModelLoader:
     DESCRIPTION = "Loads an upscale model for use with upscalers"
 
     def load_model(self, model_name):
+        import comfy.model_management as model_management
+        import comfy.model_patcher
+
         print("loading upscale model", model_name)
         model_path = model_name
         verify_model_file_exists(model_path, "upscale model")
@@ -736,6 +739,29 @@ class AnymatixUpscaleModelLoader:
 
         if not isinstance(out, ImageModelDescriptor):
             raise Exception("Upscale model must be a single-image model.")
+
+        # THE CONSUMER ASKS THIS OBJECT FOR A PATCHER, AND IT HAD NONE.
+        #
+        # ComfyUI's own UpscaleModelLoader attaches one before returning
+        # (comfy_extras/nodes_upscale_model.py), and ImageUpscaleWithModel then
+        # reads `upscale_model.patcher.load_device` and hands `[patcher]` to
+        # load_models_gpu. This loader is the url-fetching twin of that node and
+        # stopped one line earlier, so every run of Anymatix's "Upscale Image
+        # 4x" died at once with:
+        #
+        #   'ImageModelDescriptor' object has no attribute 'patcher'
+        #
+        # Measured 2026-08-31 on a real machine: the card failed in one second,
+        # at load, while its sibling "Upscale Image" rendered clean in the same
+        # sweep. ComfyUI moved and this twin did not.
+        #
+        # Kept verbatim from upstream, deliberately: a twin that paraphrases is
+        # a twin that drifts again.
+        out.patcher = comfy.model_patcher.CoreModelPatcher(
+            out.model,
+            load_device=model_management.get_torch_device(),
+            offload_device=model_management.unet_offload_device(),
+        )
 
         return (out,)
 
