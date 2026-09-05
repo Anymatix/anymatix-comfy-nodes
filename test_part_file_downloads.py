@@ -77,6 +77,36 @@ def main():
             raised = str(e)
         check("no data at all is an error that says so", "produced no data" in raised)
 
+    # ------------------------------------------------------------------
+    # ONE PLACE MAKES A PART PATH, AND THE PARALLEL PATH IS NOT IT.
+    #
+    # Every check above exercises `part_path_for` and `finalize_download`, and
+    # all ten passed for months while the PARALLEL downloader wrote to
+    # `<name>.safetensors.part.part`: `download_file` built the part path with
+    # `part_path_for` and handed it to `fetch_parallel`, whose downloader
+    # appended `.part` a second time. A completed transfer then failed to
+    # finalise ("Download produced no data") and no later run could resume,
+    # because it looked for the single-suffix name that never existed.
+    # Measured 2026-09-05 on a remote: a complete 323 MB SAM2 weight wearing
+    # two suffixes. bugs/the-parallel-download-writes-part-part-can
+    #
+    # A behavioural test cannot reach that code without a server and a real
+    # transfer, so the module is read instead — the property is "nobody else
+    # derives a part path", which is a statement about the whole file.
+    print("\none place makes a part path")
+    source = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fetch.py"),
+        encoding="utf-8",
+    ).read()
+    check(
+        "the parallel downloader writes where it was told, and appends nothing",
+        'f"{self.file_path}.part"' not in source,
+    )
+    check(
+        "only part_path_for builds a part path",
+        source.count('+ ".part"') == 1,
+    )
+
     if failures:
         print(f"\n{len(failures)} FAILED")
         return 1

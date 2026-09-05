@@ -561,7 +561,24 @@ class AsyncParallelDownloader:
                 # half-downloaded weight as finished. The part file carries
                 # that risk instead, and only a completed download is renamed
                 # into place.
-                part_path = f"{self.file_path}.part"
+                # THE PATH HANDED IN IS ALREADY THE PART PATH. DO NOT DERIVE
+                # ANOTHER ONE.
+                #
+                # `download_file` builds it once with `part_path_for` and passes
+                # THAT into `fetch_parallel`. Appending `.part` here built it a
+                # second time, so every parallel download wrote to
+                # `<name>.safetensors.part.part` — measured 2026-09-05 on a
+                # remote, a complete 323 MB SAM2 weight wearing two suffixes.
+                #
+                # It is not a cosmetic name. `finalize_download` is then handed
+                # `<name>.part`, which never existed, and raises "Download
+                # produced no data" on a transfer that finished perfectly; the
+                # next run reads `local_file_size` from that same absent
+                # `.part`, sees 0, and re-downloads the whole file from byte
+                # zero. The `.part` scheme exists to make interrupted downloads
+                # resumable, and on this path it could not resume once.
+                # `bugs/the-parallel-download-writes-part-part-can`.
+                part_path = self.file_path
                 os.makedirs(os.path.dirname(part_path) or ".", exist_ok=True)
                 async with aiofiles.open(part_path, 'wb') as prealloc:
                     await prealloc.truncate(self.total_size)
@@ -635,7 +652,7 @@ class AsyncParallelDownloader:
             # A part file still here was not salvageable: its holes are in the
             # middle, so it is neither a resumable prefix nor a download.
             try:
-                stale = f"{self.file_path}.part"
+                stale = self.file_path
                 if os.path.exists(stale):
                     os.remove(stale)
             except Exception:
@@ -704,7 +721,14 @@ def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
 
 def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, Optional[int]], None]] = None,
                   local_file_size: int = 0, max_connections: int = 8) -> bool:
-    """State-of-the-art parallel download with intelligent fallback"""
+    """
+    Parallel download with intelligent fallback.
+
+    `file_path` IS THE PATH TO WRITE, and the caller has already made it a part
+    path (`part_path_for`). Nothing in here may append `.part` to it: doing so
+    produced `<name>.safetensors.part.part`, which `finalize_download` cannot
+    see and no later run can resume from.
+    """
     
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library not available for parallel download")
