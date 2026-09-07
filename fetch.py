@@ -505,6 +505,10 @@ class AsyncParallelDownloader:
         self.max_connections = max_connections
         self.downloaded_bytes = 0
         self.lock = asyncio.Lock()
+        # How many bytes of resumable prefix the salvage decided to KEEP, if it
+        # ran. Zero means there is nothing on disk worth resuming from, and the
+        # error path is then free to remove the part file. See `download_async`.
+        self.kept_prefix = 0
         
     async def download_async(self) -> bool:
         """Execute async parallel download with HTTP/2 optimization"""
@@ -627,6 +631,14 @@ class AsyncParallelDownloader:
                         if prefix > 0:
                             with open(part_path, 'r+b') as trim:
                                 trim.truncate(prefix)
+                            # SAY SO, BECAUSE THE ERROR PATH BELOW DELETES THIS
+                            # FILE OTHERWISE. The raise a few lines down lands
+                            # in `except Exception` at the end of this method,
+                            # which removed `self.file_path` on the assumption
+                            # that a surviving part file must be a holed one.
+                            # It is not: it is what we just truncated on
+                            # purpose.
+                            self.kept_prefix = prefix
                             # No rename: `part_path` IS `self.file_path` (the
                             # caller's part file). `os.replace` here was a
                             # no-op that read like a move, which is how the
@@ -668,9 +680,21 @@ class AsyncParallelDownloader:
                     pass
             # A part file still here was not salvageable: its holes are in the
             # middle, so it is neither a resumable prefix nor a download.
+            #
+            # UNLESS THE SALVAGE KEPT IT, AND IT DID.
+            #
+            # The failed-segment branch above truncates to the last byte before
+            # the first hole and then raises, so the exception it raises arrives
+            # HERE — and this `os.remove` deleted the prefix a few frames after
+            # printing "Keeping the N bytes that landed". The caller then found
+            # no part file, resumed from 0, and a 27 GB weight interrupted at
+            # 18% started again from zero. Fixing the caller to read the part
+            # path (`bugs/an-interrupted-parallel-download-restarted-from-zero`)
+            # was necessary and was not enough: by the time it looked, there was
+            # nothing left to look at.
             try:
                 stale = self.file_path
-                if os.path.exists(stale):
+                if self.kept_prefix <= 0 and os.path.exists(stale):
                     os.remove(stale)
             except Exception:
                 pass
