@@ -1,0 +1,1433 @@
+import sys
+import asyncio
+import datetime
+from .expunge import *
+import json
+from typing import Dict
+import app.logger
+import folder_paths
+from aiohttp import web
+import os
+import re
+import hashlib
+import time
+import socket
+import threading
+from server import PromptServer
+import app
+
+from .anymatix_checkpoint_fetcher import (
+    # AnymatixCheckpointFetcher,
+    AnymatixCheckpointLoader,
+    AnymatixFetcher,
+    AnymatixLoraLoader,
+    AnymatixUpscaleModelLoader,
+    AnymatixCLIPLoader,
+    AnymatixUNETLoader,
+    AnymatixVAELoader,
+    AnymatixControlNetLoader,
+    AnymatixCLIPVisionLoader,
+    AnymatixUNETLoaderGGUF,
+    AnymatixLoraLoaderModelOnly,
+    AnymatixDualCLIPLoader,
+    AnymatixTripleCLIPLoader,
+    AnymatixQuadrupleCLIPLoader,
+    AnymatixCLIPLoader2,
+    AnymatixAudioEncoderLoader,
+    AnymatixModelPatchLoader,
+    AnymatixLTXVAudioVAELoader,
+    AnymatixLTXAVTextEncoderLoader,
+    AnymatixLatentUpscaleModelLoader,
+    AnymatixSAM2Loader,
+    AnymatixZoeDepthAnythingPreprocessor,
+    AnymatixHEDPreprocessor,
+    AnymatixDWPreprocessor,
+    AnymatixSeedVR2LoadDiTModel,
+    AnymatixSeedVR2LoadVAEModel,
+)
+from .anymatix_image_save import Anymatix_Image_Save
+from .anymatix_maskimage import AnymatixMaskImage
+from .anymatix_image_to_video import AnymatixImageToVideo
+from .anymatix_ltx_resize import AnymatixLTXResizeToClosestValidSize
+from .anymatix_media_length import AnymatixAudioDuration, AnymatixFrameCount
+from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
+from .anymatix_save_audio import AnymatixSaveAudio
+from .anymatix_save_json import AnymatixSaveJson
+from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
+from .anymatix_clipseg import AnymatixCLIPSeg
+from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
+from .host_compute_metrics import sample_host_compute_metrics
+
+NODE_CLASS_MAPPINGS = {
+    # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
+    "AnymatixCheckpointLoader": AnymatixCheckpointLoader,
+    "AnymatixLoraLoader": AnymatixLoraLoader,
+    "AnymatixFetcher": AnymatixFetcher,
+    "AnymatixImageSave": Anymatix_Image_Save,
+    "AnymatixUpscaleModelLoader": AnymatixUpscaleModelLoader,
+    "AnymatixMaskImage": AnymatixMaskImage,
+    "AnymatixCLIPLoader": AnymatixCLIPLoader,
+    "AnymatixUNETLoader": AnymatixUNETLoader,
+    "AnymatixVAELoader": AnymatixVAELoader,
+    "AnymatixControlNetLoader": AnymatixControlNetLoader,
+    "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
+    "AnymatixImageToVideo": AnymatixImageToVideo,
+    "AnymatixLTXResizeToClosestValidSize": AnymatixLTXResizeToClosestValidSize,
+    "AnymatixAudioDuration": AnymatixAudioDuration,
+    "AnymatixFrameCount": AnymatixFrameCount,
+    "AnymatixSaveAnimatedMP4": AnymatixSaveAnimatedMP4,
+    "AnymatixSaveAudio": AnymatixSaveAudio,
+    "AnymatixLoraLoaderModelOnly": AnymatixLoraLoaderModelOnly,
+    "AnymatixDualCLIPLoader": AnymatixDualCLIPLoader,
+    "AnymatixTripleCLIPLoader": AnymatixTripleCLIPLoader,
+    "AnymatixQuadrupleCLIPLoader": AnymatixQuadrupleCLIPLoader,
+    "AnymatixCLIPLoader2": AnymatixCLIPLoader2,
+    "AnymatixAudioEncoderLoader": AnymatixAudioEncoderLoader,
+    "AnymatixModelPatchLoader": AnymatixModelPatchLoader,
+    "AnymatixLTXVAudioVAELoader": AnymatixLTXVAudioVAELoader,
+    "AnymatixLTXAVTextEncoderLoader": AnymatixLTXAVTextEncoderLoader,
+    "AnymatixLatentUpscaleModelLoader": AnymatixLatentUpscaleModelLoader,
+    "AnymatixSAM2Loader": AnymatixSAM2Loader,
+    "AnymatixZoeDepthAnythingPreprocessor": AnymatixZoeDepthAnythingPreprocessor,
+    "AnymatixHEDPreprocessor": AnymatixHEDPreprocessor,
+    "AnymatixDWPreprocessor": AnymatixDWPreprocessor,
+    "AnymatixSaveJson": AnymatixSaveJson,
+    "AnymatixMaskToSAMcoord": AnymatixMaskToSAMcoord,
+    "AnymatixCLIPSeg": AnymatixCLIPSeg,
+    "AnymatixSeedVR2LoadDiTModel": AnymatixSeedVR2LoadDiTModel,
+    "AnymatixSeedVR2LoadVAEModel": AnymatixSeedVR2LoadVAEModel,
+    "AnymatixChatterboxPackFromFetchedName": AnymatixChatterboxPackFromFetchedName,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    # "AnymatixCheckpointFetcher": "Anymatix Checkpoint Fetcher",
+    "AnymatixCheckpointLoader": "Anymatix Checkpoint Loader",
+    "AnymatixFetcher": "Anymatix Fetcher",
+    "AnymatixLoraLoader": "Anymatix Lora Loader",
+    "AnymatixImageSave": "Anymatix Image Save",
+    "AnymatixUpscaleModelLoader": "Anymatix Upscale Model Loader",
+    "AnymatixMaskImage": "Anymatix Mask Image",
+    "AnymatixCLIPLoader": "Anymatix CLIP Loader",
+    "AnymatixUNETLoader": "Anymatix UNET Loader",
+    "AnymatixVAELoader": "Anymatix VAE Loader",
+    "AnymatixControlNetLoader": "Anymatix ControlNet Loader",
+    "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
+    "AnymatixImageToVideo": "Anymatix Image To Video",
+    "AnymatixLTXResizeToClosestValidSize": "Anymatix LTX Resize To Closest Valid Size",
+    "AnymatixAudioDuration": "Anymatix Audio Duration",
+    "AnymatixFrameCount": "Anymatix Frame Count",
+    "AnymatixSaveAnimatedMP4": "Anymatix Save Animated MP4",
+    "AnymatixSaveAudio": "Anymatix Save Audio",
+    "AnymatixLoraLoaderModelOnly": "Anymatix Lora Loader Model Only",
+    "AnymatixDualCLIPLoader": "Anymatix Dual CLIP Loader",
+    "AnymatixTripleCLIPLoader": "Anymatix Triple CLIP Loader",
+    "AnymatixQuadrupleCLIPLoader": "Anymatix Quadruple CLIP Loader",
+    "AnymatixCLIPLoader2": "Anymatix CLIP Loader 2",
+    "AnymatixAudioEncoderLoader": "Anymatix Audio Encoder Loader",
+    "AnymatixModelPatchLoader": "Anymatix Model Patch Loader",
+    "AnymatixLTXVAudioVAELoader": "Anymatix LTXV Audio VAE Loader",
+    "AnymatixLTXAVTextEncoderLoader": "Anymatix LTX Audio Text Encoder Loader",
+    "AnymatixLatentUpscaleModelLoader": "Anymatix Latent Upscale Model Loader",
+    "AnymatixSAM2Loader": "Anymatix SAM2 Loader",
+    "AnymatixZoeDepthAnythingPreprocessor": "Anymatix Zoe Depth Anything",
+    "AnymatixHEDPreprocessor": "Anymatix HED Soft Edge",
+    "AnymatixDWPreprocessor": "Anymatix DWPose Estimator",
+    "AnymatixSaveJson": "Anymatix Save Json",
+    "AnymatixMaskToSAMcoord": "Anymatix Mask To SAM coord",
+    "AnymatixCLIPSeg": "Anymatix CLIPSeg",
+    "AnymatixSeedVR2LoadDiTModel": "Anymatix SeedVR2 Load DiT Model",
+    "AnymatixSeedVR2LoadVAEModel": "Anymatix SeedVR2 Load VAE Model",
+    "AnymatixChatterboxPackFromFetchedName": "Anymatix Chatterbox pack (from fetcher)",
+}
+
+
+# THE GGUF LOADER APPEARS ONLY IF ITS SIBLING DOES.
+#
+# `AnymatixUNETLoaderGGUF` subclasses a class from ComfyUI-GGUF, a separate
+# node pack. Building it used to happen at import time with no guard, so a
+# ComfyUI without that pack failed to import THIS one and lost all forty-odd
+# nodes over one optional loader (see `_build_gguf_unet_loader`). It is now
+# None when the sibling is absent, and a node that does not exist is simply not
+# registered — which is what ComfyUI's menu should say about it.
+if AnymatixUNETLoaderGGUF is not None:
+    NODE_CLASS_MAPPINGS["AnymatixUNETLoaderGGUF"] = AnymatixUNETLoaderGGUF
+    NODE_DISPLAY_NAME_MAPPINGS["AnymatixUNETLoaderGGUF"] = "Anymatix UNET Loader GGUF"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+
+print(f"anymatix: running on host {socket.gethostname()}")
+allowed_dirs = ["output", "input", "models"]
+
+routes = PromptServer.instance.routes
+
+# Heartbeat monitoring state (timer-reset model)
+# The client sends the timeout in the POST body, and the server will exit
+# if no heartbeat is received within that timeout
+_heartbeat_timer_task: asyncio.Task | None = None
+_heartbeat_timeout_seconds: int = 300  # Last received timeout, for reporting
+_heartbeat_lock = asyncio.Lock()
+
+
+def _heartbeat_may_end_this_process() -> bool:
+    """Whether a heartbeat is allowed to arm the watchdog that ENDS this machine.
+
+    THE ROUTE COULD SHUT DOWN A COMFYUI THAT NEVER ASKED FOR A WATCHDOG.
+
+    `/anymatix/heartbeat` is registered on ComfyUI's own server, which is often
+    bound to a LAN address. One unauthenticated POST of `{"timeout": 1}` used to
+    arm `_heartbeat_timer`, and a second later `_end_container` ran: `os._exit(0)`
+    on a desktop, and a stop-or-TERMINATE request on a RunPod pod. That is the
+    whole feature when Anymatix started this process — and a remote kill switch
+    when somebody merely installed this pack from the registry.
+
+    `ANYMATIX_HEARTBEAT_PORT` is the honest discriminator, and it costs nothing
+    to check: Anymatix's own bootstrap sets it before launching ComfyUI, on
+    every route including local (`app/src/machines/ComfyUI/bootstrap.py`,
+    "THE LIVENESS PORT, DERIVED SO BOTH ENDS AGREE WITHOUT A SETTING"), and
+    nothing else in the world sets it. So the behaviour Anymatix depends on is
+    unchanged, and a stock ComfyUI that installed this pack cannot be ended by
+    an HTTP request.
+
+    The route still ANSWERS — a client that pings is told the truth, `armed`
+    false — because a silent 404 would look like an old build rather than a
+    machine that is not ours to stop.
+    """
+    return bool((os.environ.get("ANYMATIX_HEARTBEAT_PORT") or "").strip())
+
+
+async def _heartbeat_timer(timeout_seconds: int):
+    """Wait timeout_seconds and then exit the process.
+
+    This task is created on first heartbeat and recreated on each subsequent
+    heartbeat. If it ever completes, it will force-exit the process.
+    """
+    try:
+        await asyncio.sleep(timeout_seconds)
+        _end_container(f"no heartbeat for {timeout_seconds}s")
+    except asyncio.CancelledError:
+        # Timer was reset/cancelled by a newer heartbeat; that's normal
+        return
+    except Exception as e:
+        print(f"anymatix: heartbeat timer error: {e}")
+
+
+@routes.get("/anymatix/log")
+async def get_log(request):
+    return web.json_response(list(app.logger.get_logs()))
+
+
+@routes.get("/anymatix/host_compute_metrics")
+async def anymatix_host_compute_metrics(_request):
+    """CPU/GPU compute utilization sampled on the Comfy host (same machine as inference)."""
+    try:
+        data = await asyncio.to_thread(sample_host_compute_metrics)
+        return web.json_response(data)
+    except Exception as e:
+        print(f"anymatix: host_compute_metrics error: {e}")
+        return web.json_response({"cpu": None, "gpu": None}, status=500)
+
+
+# ── Heartbeat on its own thread, on its own socket ───────────────────────────
+#
+# THE ENDPOINT MUST ANSWER WHILE THE MACHINE IS BUSY, WHICH IS PRECISELY WHEN
+# IT COULD NOT.
+#
+# The route below lives on ComfyUI's aiohttp loop. Staging a model holds that
+# loop for tens of seconds — a z-image run stages 7.6 + 6.4 + 11.7 GB — so the
+# POST went unanswered, the app concluded the machine was dead, tore the
+# session down, and the restart began staging the same models again. Observed
+# as three restarts in six minutes, none reaching step 1 of 9, on a pod billing
+# throughout.
+#
+# So liveness gets its own thread and its own socket. It never touches the
+# event loop, the executor, or any lock they hold: it accepts, reads nothing it
+# does not need, resets the watchdog deadline through a plain threading
+# primitive, and replies. That work needs the GIL for microseconds and spends
+# the rest of its life blocked in accept(), which is exactly the shape of thing
+# the interpreter keeps scheduling while heavy work runs.
+#
+# The aiohttp route stays, unchanged, for clients that only have the one port.
+def _pod_env(name: str, default: str = "") -> str:
+    """Read a pod-level variable that our own process was never given.
+
+    THE STOP WAS NEVER ATTEMPTED. THAT IS THE WHOLE BUG.
+
+    RunPod injects RUNPOD_POD_ID and RUNPOD_API_KEY into the CONTAINER's init
+    process. ComfyUI is not started by that init — the app launches it over an
+    ssh session, and an ssh session does not inherit the container's
+    environment. Measured 2026-08-27 on pod nvns4tlck1dpwk: `/proc/1/environ`
+    carries RUNPOD_POD_ID, RUNPOD_API_KEY and ANYMATIX_ONDISCONNECT, and the
+    ComfyUI process has none of the three.
+
+    So `if pod_id and api_key:` was always false, the stop request was never
+    even sent, and control fell straight through to the `kill(1)` that made
+    RunPod rebuild the container. Every "the API must have been refused" theory
+    was looking for a failure that never happened, because nothing was ever
+    asked.
+
+    PID 1's environment is the honest source, with RunPod's own
+    /etc/rp_environment as the backstop — that file is how the platform makes
+    the same values available to shells that did not inherit them.
+    """
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    try:
+        with open("/proc/1/environ", "rb") as fh:
+            for entry in fh.read().split(b"\0"):
+                key, _, val = entry.decode(errors="replace").partition("=")
+                if key == name and val.strip():
+                    return val.strip()
+    except Exception:
+        pass
+    try:
+        with open("/etc/rp_environment", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                key, _, val = line.partition("=")
+                if key.strip() == name:
+                    return val.strip().strip("\"'")
+    except Exception:
+        pass
+    return default
+
+
+def _lifecycle_journal_path() -> str:
+    """Where a death can still be read after the body is gone.
+
+    THE EVIDENCE MUST OUTLIVE THE PROCESS THAT PRODUCES IT.
+
+    Everything `_end_container` used to say went to stdout, i.e. to the log of
+    a process about to be SIGKILLed inside a container about to be replaced.
+    On 2026-08-27 a pod sat billing for nothing and the only way to reconstruct
+    why was mtimes and `ps -o lstart` — the shutdown itself had left no record
+    at all, so "the stop was refused" and "the stop was never attempted" looked
+    identical from outside.
+
+    `/workspace` is the network volume: it survives a container restart AND a
+    pod stop, which is exactly the span this file has to bridge. Falling back
+    to the install dir keeps local runs working, where nothing is lost anyway.
+    """
+    for base in ("/workspace", os.path.dirname(os.path.dirname(os.path.dirname(__file__)))):
+        try:
+            d = os.path.join(base, ".anymatix")
+            os.makedirs(d, exist_ok=True)
+            return os.path.join(d, "lifecycle.jsonl")
+        except Exception:
+            continue
+    return ""
+
+
+def _journal(event: str, **fields) -> None:
+    """One JSON line per lifecycle event, flushed and fsynced before we move on.
+
+    fsync is not superstition here: the next statement may be the one that ends
+    the process, and a line still sitting in a page cache is a line that never
+    happened.
+    """
+    record = {
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "event": event,
+        "pod": _pod_env("RUNPOD_POD_ID") or None,
+        "pid": os.getpid(),
+        **fields,
+    }
+    line = json.dumps(record, default=str)
+    print(f"anymatix-lifecycle: {line}")
+    path = _lifecycle_journal_path()
+    if not path:
+        return
+    try:
+        # Bounded: a pod that flaps must not fill the volume with its own diary.
+        if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+            os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception as e:
+        print(f"anymatix: could not write lifecycle journal ({e})")
+
+
+def _runpodctl_stop(pod_id: str, action: str, api_key: str = "") -> tuple[bool, str]:
+    """Ask RunPod's own CLI, which every pod carries with a pod-scoped key.
+
+    PREFERRED OVER OUR HTTP CALL, for one reason: the credential.
+
+    `runpodctl` is installed on every pod by RunPod itself, already
+    authenticated with a key scoped to that pod — nothing for us to inject and
+    nothing to get wrong. Our HTTP path depends on RUNPOD_API_KEY reaching the
+    container's environment correctly, and when it does not there is literally
+    nothing inside the machine that can stop the bill.
+
+    RunPod's own documentation names this exact case: a container that has
+    finished its work and must not be restarted by the platform.
+
+    NOT A DEPENDENCY WE OWN. It comes from the base image
+    (`runpod/pytorch:...`); neither the Anymatix Dockerfile nor bootstrap.py
+    installs it, and the app never invokes it at all. Hence the `which` guard
+    and the HTTP fallback: a base image without it must degrade, not break.
+
+    THE ENVIRONMENT IS PASSED EXPLICITLY, and that is not a detail. A
+    subprocess inherits OUR environment, and ours is the one that started this
+    whole investigation: ComfyUI is launched over ssh and has no
+    RUNPOD_API_KEY. Letting runpodctl inherit it would have reproduced the
+    exact bug on a second road — a stop that looks attempted and cannot
+    authenticate.
+    """
+    import shutil
+    import subprocess
+    if not shutil.which("runpodctl"):
+        return False, "runpodctl not installed"
+    verb = "remove" if action == "terminate" else "stop"
+    env = dict(os.environ)
+    if api_key:
+        env["RUNPOD_API_KEY"] = api_key
+    if pod_id:
+        env["RUNPOD_POD_ID"] = pod_id
+    try:
+        proc = subprocess.run(
+            ["runpodctl", verb, "pod", pod_id],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        detail = ((proc.stdout or "") + (proc.stderr or "")).strip()[:500]
+        return proc.returncode == 0, detail or f"exit {proc.returncode}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _runpod_pod_action(pod_id: str, api_key: str, action: str) -> tuple[int, str]:
+    """POST the stop/terminate and return what RunPod actually said."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://api.runpod.io/v2/pods/{pod_id}/action",
+        data=json.dumps({"action": action}).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read(2000).decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(2000).decode(errors="replace")
+    except Exception as e:
+        return 0, f"{type(e).__name__}: {e}"
+
+
+# How long we keep asking. RunPod normally pulls the plug in seconds; this is
+# the horizon after which continuing to ask is not going to help either.
+_STOP_RETRY_SECONDS = 20 * 60
+_STOP_RETRY_INTERVAL = 30
+
+
+def _end_container(reason: str) -> None:
+    """End the whole pod, not just this process.
+
+    THE PROCESS DYING IS NOT THE POINT — THE BILL STOPPING IS. And on a Pod,
+    the ONLY thing that stops the bill is the API. That is the correction this
+    function is built around, paid for on 2026-08-27.
+
+    The previous version called the API, waited five seconds, and then killed
+    PID 1 regardless — "whether or not the API answered, stop costing money".
+    That reasoning holds for a container you own and is false for a RunPod Pod:
+    killing PID 1 does not stop the pod, it makes RunPod BUILD A NEW CONTAINER.
+    The bill continues, and the new container comes up without ComfyUI (the app
+    starts it over ssh), so the replacement has no heartbeat watchdog in it —
+    the kill destroys the only mechanism that could ever have ended the
+    machine. Measured: container killed 05:49:54, recreated 05:59:14 on the
+    same overlay (the container disk still held the pre-death logs, so the pod
+    had never stopped), then RUNNING and billing with no python process on it.
+
+    So the escalation is gone. We ask, we record what we were told, and we keep
+    asking. A process that is still alive is a process that can still ask —
+    that is worth more than a dramatic exit.
+
+    ANYMATIX_ONDISCONNECT decides stop vs terminate, the same setting the app
+    already exposes.
+    """
+    action = "terminate" if _pod_env("ANYMATIX_ONDISCONNECT", "stop") == "terminate" else "stop"
+    pod_id = _pod_env("RUNPOD_POD_ID")
+    api_key = _pod_env("RUNPOD_API_KEY")
+    in_container = os.path.exists("/.dockerenv")
+    _journal(
+        "end-requested",
+        reason=reason,
+        action=action,
+        in_container=in_container,
+        has_pod_id=bool(pod_id),
+        has_api_key=bool(api_key),
+    )
+
+    # Durability first: stopping wipes the container disk, and a cache→volume
+    # mirror still in flight there is a download paid for and lost — the
+    # redownload-after-reboot bug. This is the one stop we initiate ourselves,
+    # so it is the one place the wait can happen. Bounded, and instant when
+    # nothing is mirroring.
+    try:
+        from .anymatix_checkpoint_fetcher import drain_mirror_threads
+        drain_mirror_threads()
+    except Exception as e:
+        print(f"anymatix: mirror drain skipped ({e})")
+
+    # NOT IN A CONTAINER: exiting the process IS stopping the machine, and
+    # there is no bill to stop. On somebody's desktop PID 1 is their init, so
+    # none of the pod handling below may run here.
+    if not pod_id and not in_container:
+        _journal("end-local", note="not a pod — exiting the process")
+        os._exit(0)
+
+    if not pod_id:
+        _journal(
+            "end-impossible",
+            note="no RUNPOD_POD_ID in this pod's environment — nothing in here "
+                 "can stop the bill; the app must stop the pod",
+        )
+        os._exit(1)
+
+    deadline = time.time() + _STOP_RETRY_SECONDS
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        # runpodctl first: its key is provisioned by RunPod and scoped to this
+        # pod, so it works even when ours never made it into the environment.
+        ok, detail = _runpodctl_stop(pod_id, action, api_key)
+        _journal("stop-requested", attempt=attempt, action=action,
+                 via="runpodctl", accepted=ok, response=detail)
+        if not ok and api_key:
+            status, body = _runpod_pod_action(pod_id, api_key, action)
+            _journal("stop-requested", attempt=attempt, action=action,
+                     via="api", http_status=status, response=body[:500],
+                     accepted=200 <= status < 300)
+        elif not ok:
+            _journal("stop-fallback-unavailable",
+                     note="runpodctl failed and RUNPOD_API_KEY is not set")
+        # Accepted or refused, the answer is the same: wait, then ask again.
+        # If it was accepted the platform is about to end us and this loop
+        # simply never gets another turn — and if it does, that IS the finding,
+        # recorded above with RunPod's own words next to it.
+        time.sleep(_STOP_RETRY_INTERVAL)
+
+    _journal(
+        "stop-gave-up",
+        attempts=attempt,
+        waited_seconds=_STOP_RETRY_SECONDS,
+        note="RunPod never stopped this pod after repeated accepted requests",
+    )
+    os._exit(1)
+
+
+_hb_deadline_lock = threading.Lock()
+_hb_deadline: float = 0.0
+_hb_timeout_seconds: int = 300
+
+
+def _hb_touch(timeout_seconds: int) -> None:
+    global _hb_deadline, _hb_timeout_seconds
+    with _hb_deadline_lock:
+        _hb_timeout_seconds = timeout_seconds
+        _hb_deadline = time.time() + timeout_seconds
+
+
+def _hb_watchdog() -> None:
+    """Exit when no heartbeat has arrived for the timeout the client asked for.
+
+    Deliberately a thread and not an asyncio task: the whole point is to keep
+    working while the loop is blocked. Nothing has been received yet means
+    nothing to enforce, so a zero deadline waits rather than exits.
+    """
+    while True:
+        time.sleep(5)
+        with _hb_deadline_lock:
+            deadline = _hb_deadline
+            timeout = _hb_timeout_seconds
+        if deadline and time.time() > deadline:
+            _end_container(f"no heartbeat for {timeout}s")
+
+
+def _hb_serve(port: int) -> None:
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                timeout = int(json.loads(raw or b"{}").get("timeout", 60))
+            except Exception:
+                timeout = 60
+            _hb_touch(timeout)
+            body = json.dumps({"status": "ok", "seconds_until_death": timeout}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            self.do_POST()
+
+        def log_message(self, *_args):
+            pass  # one line per heartbeat would bury the log it shares
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        print(f"anymatix: heartbeat side-channel could not bind {port}: {e}")
+        return
+    print(f"anymatix: heartbeat side-channel listening on 127.0.0.1:{port}")
+    server.serve_forever()
+
+
+def _start_heartbeat_side_channel() -> None:
+    # Same opt-in as the aiohttp route, and it always was: an unset
+    # ANYMATIX_HEARTBEAT_PORT already meant "no watchdog here".
+    if not _heartbeat_may_end_this_process():
+        return
+    try:
+        port = int(os.environ.get("ANYMATIX_HEARTBEAT_PORT", "0"))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return
+    threading.Thread(target=_hb_serve, args=(port,), daemon=True).start()
+    threading.Thread(target=_hb_watchdog, daemon=True).start()
+
+
+_start_heartbeat_side_channel()
+
+# THE LINE THAT MAKES A RESTART VISIBLE.
+#
+# A container that is killed and rebuilt looks, from the outside, exactly like
+# one that was never stopped — same pod id, same volume, and (because a restart
+# does not wipe the container disk) the same files carrying the same
+# timestamps. The pair `end-requested` … `boot` in one journal is what tells
+# the two apart, and it is the pair that was missing on 2026-08-27.
+_journal("boot", host=socket.gethostname())
+
+
+@routes.post('/anymatix/heartbeat')
+async def serve_heartbeat(request):
+    """Receive heartbeat pings from the Anymatix app.
+
+    The client sends the desired timeout in the POST body as {"timeout": seconds}.
+    Each POST resets the server-side watchdog timer to that timeout.
+    If no heartbeat arrives within the timeout, the process exits.
+    """
+    global _heartbeat_timer_task, _heartbeat_timeout_seconds
+    try:
+        # Read timeout from request body
+        data = await request.json()
+        timeout = data.get("timeout", 60)  # Default 60s if not specified
+        _heartbeat_timeout_seconds = timeout
+        print(f"anymatix: heartbeat received, timeout={timeout}s")
+
+        if not _heartbeat_may_end_this_process():
+            # Not a machine Anymatix started: answer, arm nothing. See
+            # `_heartbeat_may_end_this_process`.
+            return web.json_response({"status": "ok", "armed": False})
+
+        # Reset the watchdog timer: cancel previous timer task and create a new one
+        async with _heartbeat_lock:
+            if _heartbeat_timer_task is not None:
+                try:
+                    _heartbeat_timer_task.cancel()
+                except Exception:
+                    pass
+            loop = asyncio.get_event_loop()
+            _heartbeat_timer_task = loop.create_task(_heartbeat_timer(timeout))
+        return web.json_response({"status": "ok", "armed": True, "seconds_until_death": timeout})
+    except Exception as e:
+        print(f"anymatix: heartbeat endpoint error: {e}")
+        return web.json_response({"status": "error", "error": str(e)}, status=500)
+
+
+@routes.get("/anymatix/hashedModelAssetExists")
+async def hashed_model_asset_exists(request):
+    hash_value = request.rel_url.query.get("hash") or ""
+    folder_paths_key = request.rel_url.query.get("folder_paths_key") or ""
+    ext = request.rel_url.query.get("extension") or ""
+    if not hash_value or not folder_paths_key or not ext:
+        return web.Response(status=400, text="missing hash, folder_paths_key, or extension")
+    try:
+        dirs = folder_paths.get_folder_paths(folder_paths_key)
+    except KeyError:
+        return web.json_response({"exists": False})
+    for d in dirs:
+        fp = os.path.join(d, f"{hash_value}.{ext}")
+        if os.path.isfile(fp):
+            return web.json_response({"exists": True})
+    return web.json_response({"exists": False})
+
+
+# THE FILENAME OF AN UPLOAD IS BUILT FROM TWO FIELDS THE CALLER CONTROLS.
+#
+# `uploadAsset` composed its destination as
+# `os.path.join(dest_dir, f"{hash}.{extension}")` with both halves taken
+# verbatim out of the multipart form. `extension` = "safetensors/../../../.."
+# walks straight out of the model root, on a route registered on ComfyUI's own
+# server with no authentication — and the sha256 check that would have caught a
+# wrong FILE happens after the write and says nothing about where it went.
+#
+# The two fields have exact shapes and always did: the hash is what the file
+# will be named and verified against, so it is 64 hex characters, and the
+# extension is a file extension. Anything else is not a stricter caller, it is
+# a different caller.
+_UPLOAD_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
+_UPLOAD_EXT_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
+
+
+def _upload_name_is_safe(hash_value, file_extension) -> bool:
+    return bool(
+        isinstance(hash_value, str)
+        and isinstance(file_extension, str)
+        and _UPLOAD_HASH_RE.match(hash_value)
+        and _UPLOAD_EXT_RE.match(file_extension)
+    )
+
+
+@routes.post("/anymatix/uploadAsset")
+async def upload_asset(request):
+    """
+    Upload an asset file to the ComfyUI input directory (default), or under a
+    folder_paths model root when multipart field folder_paths_key is set.
+    Uses atomic writes and hash verification to prevent incomplete uploads.
+    Supports resumable uploads for large files.
+    """
+    reader = await request.multipart()
+
+    hash_value = None
+    file_extension = None
+    folder_paths_key = None
+    temp_path = None
+    resume_offset = 0
+
+    try:
+        # Iterate over the parts in the multipart form
+        async for part in reader:
+            if part.name == "hash":
+                hash_value = await part.text()
+            elif part.name == "extension":
+                file_extension = await part.text()
+            elif part.name == "folder_paths_key":
+                folder_paths_key = (await part.text()).strip() or None
+            elif part.name == "resume":
+                # Client requests to resume from previous upload
+                resume_requested = await part.text()
+                resume_offset = int(resume_requested) if resume_requested.isdigit() else 0
+            elif part.name == "file":
+                if not hash_value or not file_extension:
+                    return web.Response(status=400, text="Hash and extension must be provided before file")
+                if not _upload_name_is_safe(hash_value, file_extension):
+                    # See `_upload_name_is_safe`: this is the path-traversal gate.
+                    return web.Response(
+                        status=400,
+                        text="hash must be 64 hex characters and extension must be alphanumeric",
+                    )
+
+                if folder_paths_key:
+                    try:
+                        dest_dirs = folder_paths.get_folder_paths(folder_paths_key)
+                    except KeyError:
+                        return web.Response(status=400, text=f"Unknown folder_paths key: {folder_paths_key}")
+                    if not dest_dirs:
+                        return web.Response(status=400, text=f"No paths for folder_paths key: {folder_paths_key}")
+                    dest_dir = dest_dirs[0]
+                    os.makedirs(dest_dir, exist_ok=True)
+                    file_path = os.path.join(dest_dir, f"{hash_value}.{file_extension}")
+                else:
+                    file_path = os.path.join(
+                        folder_paths.input_directory, f"{hash_value}.{file_extension}"
+                    )
+                
+                # Write to temporary file first (atomic write pattern)
+                # Use same .tmp convention as downloads (fetch.py uses .segment_N for parallel, .tmp for temp)
+                temp_path = f"{file_path}.tmp"
+                
+                # Check if partial upload exists (resumable upload)
+                existing_size = 0
+                if resume_offset > 0 and os.path.exists(temp_path):
+                    existing_size = os.path.getsize(temp_path)
+                    if existing_size == resume_offset:
+                        print(f"anymatix: resuming upload of {hash_value}.{file_extension} from {existing_size} bytes")
+                    else:
+                        # Size mismatch, start over
+                        print(f"anymatix: resume offset mismatch (expected {resume_offset}, found {existing_size}), restarting upload")
+                        existing_size = 0
+                        resume_offset = 0
+                
+                try:
+                    # Open in append mode if resuming, otherwise write mode
+                    mode = "ab" if existing_size > 0 and resume_offset > 0 else "wb"
+                    with open(temp_path, mode) as output_file:
+                        bytes_written = 0
+                        while chunk := await part.read_chunk():
+                            output_file.write(chunk)
+                            bytes_written += len(chunk)
+                    
+                    total_written = existing_size + bytes_written
+                    print(f"anymatix: uploaded {bytes_written} bytes ({total_written} total) for {hash_value}.{file_extension}")
+                    
+                except Exception as write_error:
+                    # Don't delete temp file on write error - allows resume
+                    print(f"anymatix: upload write error (temp file preserved for resume): {write_error}")
+                    current_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                    return web.Response(
+                        status=500, 
+                        text=f"Upload write failed: {str(write_error)}",
+                        headers={"X-Resume-Offset": str(current_size)}
+                    )
+                
+                # Verify the uploaded file hash matches expected hash
+                try:
+                    computed_hash = hashlib.sha256()
+                    with open(temp_path, 'rb') as f:
+                        for chunk in iter(lambda: f.read(8192), b''):
+                            computed_hash.update(chunk)
+                    
+                    if computed_hash.hexdigest() != hash_value:
+                        # Hash mismatch - delete temp file
+                        os.remove(temp_path)
+                        print(f"anymatix: upload hash mismatch - expected {hash_value}, got {computed_hash.hexdigest()}")
+                        return web.Response(status=400, text="Hash verification failed - file corrupted during upload")
+                except Exception as hash_error:
+                    # Don't delete temp file on hash error - might be partial upload
+                    print(f"anymatix: upload hash verification error: {hash_error}")
+                    current_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+                    return web.Response(
+                        status=500, 
+                        text=f"Hash verification failed: {str(hash_error)}",
+                        headers={"X-Resume-Offset": str(current_size)}
+                    )
+                
+                # Atomic rename - if this succeeds, the file is complete and verified
+                try:
+                    os.rename(temp_path, file_path)
+                    print(f"anymatix: successfully uploaded and verified {hash_value}.{file_extension} ({total_written} bytes)")
+                except Exception as rename_error:
+                    # Don't delete temp file - can retry rename
+                    print(f"anymatix: upload rename error (temp file preserved): {rename_error}")
+                    return web.Response(status=500, text=f"Failed to finalize upload: {str(rename_error)}")
+        
+        if not hash_value or not file_extension:
+            return web.Response(status=400, text="Missing required fields: hash, extension, and file")
+        
+        return web.Response(status=200, text="Upload successful")
+    
+    except Exception as e:
+        # Don't clean up temp file on unexpected error - allows resume/retry
+        print(f"anymatix: upload error (temp file preserved for resume): {e}")
+        if temp_path and os.path.exists(temp_path):
+            current_size = os.path.getsize(temp_path)
+            return web.Response(
+                status=500, 
+                text=f"Upload failed: {str(e)}",
+                headers={"X-Resume-Offset": str(current_size)}
+            )
+
+
+outdir = f"{folder_paths.output_directory}/anymatix/results"
+os.makedirs(outdir, exist_ok=True)
+
+
+# --- Autonomous cache GC -----------------------------------------------------
+# The results/input cache expires on its own, on this machine, with no client
+# connected: a pod that stays up for days must not accumulate. Every value is
+# seconds; 0 disables that half of the sweep.
+_CACHE_GC_INTERVAL = int(os.environ.get("ANYMATIX_CACHE_GC_INTERVAL", 600))
+_CACHE_TTL_RESULTS = int(os.environ.get("ANYMATIX_CACHE_TTL_RESULTS", 24 * 3600))
+_CACHE_TTL_INPUTS = int(os.environ.get("ANYMATIX_CACHE_TTL_INPUTS", 3600))
+_CACHE_MIN_AGE = int(os.environ.get("ANYMATIX_CACHE_MIN_AGE", 900))
+
+_QUEUE_HASH_RE = re.compile(r"[a-f0-9]{64}")
+
+
+def _protected_hashes() -> set:
+    """Hashes named by the queue — a run may be writing or about to read them."""
+    try:
+        queue = PromptServer.instance.prompt_queue.get_current_queue()
+        return set(_QUEUE_HASH_RE.findall(json.dumps(queue, default=str)))
+    except Exception as e:
+        # Unknown queue means unknown protection: sweep nothing this round.
+        print(f"anymatix: cache gc could not read the queue ({e}), skipping sweep")
+        return None
+
+
+def _cache_gc_sweep():
+    protected = _protected_hashes()
+    if protected is None:
+        return {"results": [], "inputs": []}
+    return sweep_expired(
+        outdir,
+        folder_paths.input_directory,
+        _CACHE_TTL_RESULTS,
+        _CACHE_TTL_INPUTS,
+        _CACHE_MIN_AGE,
+        protected,
+    )
+
+
+async def _cache_gc_once():
+    result = await asyncio.to_thread(_cache_gc_sweep)
+    if result["results"] or result["inputs"]:
+        print(
+            f"anymatix: cache gc removed {len(result['results'])} results "
+            f"and {len(result['inputs'])} input assets"
+        )
+    return result
+
+
+async def _cache_gc_loop():
+    # First pass at boot: a pod coming up carries whatever the last session left.
+    while True:
+        try:
+            await _cache_gc_once()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            print(f"anymatix: cache gc error: {e}")
+        await asyncio.sleep(_CACHE_GC_INTERVAL)
+
+
+async def _start_cache_gc(_app):
+    if _CACHE_GC_INTERVAL <= 0:
+        print("anymatix: cache gc disabled (ANYMATIX_CACHE_GC_INTERVAL=0)")
+        return
+    print(
+        f"anymatix: cache gc every {_CACHE_GC_INTERVAL}s "
+        f"(results {_CACHE_TTL_RESULTS}s, inputs {_CACHE_TTL_INPUTS}s, min age {_CACHE_MIN_AGE}s)"
+    )
+    asyncio.create_task(_cache_gc_loop())
+
+
+try:
+    PromptServer.instance.app.on_startup.append(_start_cache_gc)
+except Exception as e:
+    print(f"anymatix: could not schedule cache gc: {e}")
+
+
+@routes.post("/anymatix/release_results")
+async def serve_release_results(request):
+    """Release results the app has finished archiving locally.
+
+    Deletes whole result directories by hash and nothing else — no keep set, no
+    reconciliation, so a caller that gets its list wrong can only lose the
+    entries it named. Whatever the app never releases still expires on TTL.
+    """
+    data = await request.json()
+    hashes = data.get("hashes", [])
+    if not isinstance(hashes, list):
+        return web.Response(text="'hashes' must be a list", status=400)
+
+    protected = _protected_hashes() or set()
+    result = await asyncio.to_thread(delete_result_hashes, outdir, hashes, protected)
+    if result["deleted"] or result["skipped"]:
+        print(
+            f"anymatix: released {len(result['deleted'])} results, "
+            f"kept {len(result['skipped'])} still in the queue"
+        )
+    return web.json_response(result)
+
+
+@routes.post("/anymatix/cache_gc")
+async def serve_cache_gc(_request):
+    """Run the expiry sweep now (diagnostics; the loop runs it on its own)."""
+    return web.json_response(await _cache_gc_once())
+
+
+@routes.get("/anymatix/storage_location")
+async def serve_storage_location(request):
+    return web.json_response({
+        "models_dir": folder_paths.models_dir
+    })
+
+
+@routes.get("/anymatix/reboot")
+async def serve_reboot(request):
+    # Check if deep restart is requested
+    deep_restart = request.rel_url.query.get("deep", "false").lower() == "true"
+    
+    if deep_restart:
+        print("anymatix: scheduling deep restart (same PID, module reload)")
+        # Schedule the deep restart asynchronously
+        asyncio.create_task(deep_restart_after_delay(2))
+        return web.json_response({"status": "scheduled", "message": "Deep restart scheduled", "type": "deep"})
+    else:
+        print("anymatix: performing soft restart - clearing queue and freeing memory")
+        
+        try:
+            # Import the server instance to access internal methods
+            from server import PromptServer
+            server_instance = PromptServer.instance
+            
+            # 1. Interrupt any current processing
+            import nodes
+            nodes.interrupt_processing()
+            
+            # 2. Clear the queue
+            if hasattr(server_instance, 'prompt_queue'):
+                server_instance.prompt_queue.wipe_queue()
+                print("anymatix: queue cleared")
+            
+            # 3. Free memory and unload models
+            import comfy.model_management
+            comfy.model_management.soft_empty_cache()
+            comfy.model_management.unload_all_models()
+            print("anymatix: models unloaded and memory freed")
+            
+            # 4. Close and reopen websocket connections to refresh clients
+            if hasattr(server_instance, 'sockets'):
+                for sid in list(server_instance.sockets.keys()):
+                    try:
+                        await server_instance.sockets[sid].close()
+                    except:
+                        pass
+                server_instance.sockets.clear()
+                print("anymatix: websocket connections refreshed")
+            
+            # 5. Clear any remaining execution state
+            import execution
+            if hasattr(execution, 'current_executed'):
+                execution.current_executed.clear()
+                
+            print("anymatix: soft restart completed successfully")
+            return web.json_response({"status": "success", "message": "Soft restart completed", "type": "soft"})
+            
+        except Exception as e:
+            print(f"anymatix: error during soft restart: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
+# DISABLED: This function creates a new process that escapes PowerShell job object control
+# async def reboot_after_delay(delay: int):
+#     await asyncio.sleep(delay)
+#     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+async def deep_restart_after_delay(delay: int):
+    """
+    Attempt a deeper restart by reloading core modules while keeping the same PID.
+    This maintains job object control while refreshing the ComfyUI state.
+    """
+    await asyncio.sleep(delay)
+    
+    try:
+        print("anymatix: performing deep restart - reloading core modules")
+        
+        # 1. Stop all current processing
+        import nodes
+        nodes.interrupt_processing()
+        
+        # 2. Clear execution state
+        import execution
+        if hasattr(execution, 'current_executed'):
+            execution.current_executed.clear()
+            
+        # 3. Clear model cache
+        import comfy.model_management
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
+        
+        # 4. Clear node mappings and reload
+        nodes.NODE_CLASS_MAPPINGS.clear()
+        nodes.NODE_DISPLAY_NAME_MAPPINGS.clear()
+        
+        # 5. Reload core modules
+        import importlib
+        import sys
+        
+        modules_to_reload = [
+            'nodes',
+            'execution', 
+            'comfy.model_management',
+            'folder_paths'
+        ]
+        
+        for module_name in modules_to_reload:
+            if module_name in sys.modules:
+                try:
+                    importlib.reload(sys.modules[module_name])
+                    print(f"anymatix: reloaded {module_name}")
+                except Exception as e:
+                    print(f"anymatix: failed to reload {module_name}: {e}")
+        
+        # 6. Re-initialize nodes
+        import nodes
+        nodes.init_extra_nodes()
+        
+        # 7. Clear server state
+        from server import PromptServer
+        server_instance = PromptServer.instance
+        if hasattr(server_instance, 'prompt_queue'):
+            server_instance.prompt_queue.wipe_queue()
+            server_instance.prompt_queue.wipe_history()
+            
+        print("anymatix: deep restart completed - same PID maintained")
+        
+    except Exception as e:
+        print(f"anymatix: error during deep restart: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@routes.post("/anymatix/expunge")
+async def serve_expunge(request):
+    print("anymatix: expunging cache")
+    data = await request.json()
+    input_assets: list[str] = data.get("inputAssets", [])
+    computation_results: list[str] = data.get("computationResults", [])
+    delete_hashes: list[str] = data.get("delete", [])
+    clear_all = bool(data.get("clearAll", False))
+
+    if clear_all:
+        await clear_anymatix_cache(outdir, folder_paths.input_directory)
+    else:
+        await expunge_differentiated(
+            input_assets, computation_results, outdir, folder_paths.input_directory
+        )
+
+    # If delete parameter is present, delete those hashes from results and input directories
+    from .expunge import hash_pattern, input_asset_pattern
+    deleted = []
+    for h in delete_hashes:
+        # Delete computation result dir if hash matches
+        if hash_pattern.match(h):
+            result_path = Path(outdir) / h
+            if result_path.exists():
+                try:
+                    delete_results_entry(result_path)
+                    deleted.append(str(result_path))
+                except Exception as e:
+                    print(f"Failed to delete computation result {result_path}: {e}")
+        # Delete input asset file if hash matches asset pattern
+        for f in Path(folder_paths.input_directory).glob(f"{h}.*"):
+            if input_asset_pattern.match(f.name):
+                try:
+                    os.remove(f)
+                    deleted.append(str(f))
+                except Exception as e:
+                    print(f"Failed to delete input asset {f}: {e}")
+        # Also delete any associated .tmp file for this hash
+        tmp_file = Path(folder_paths.input_directory) / f"{h}.*.tmp"
+        for tmp in Path(folder_paths.input_directory).glob(f"{h}.*.tmp"):
+            try:
+                tmp.unlink()
+                deleted.append(str(tmp))
+            except Exception as e:
+                print(f"Failed to delete temp file {tmp}: {e}")
+    if deleted:
+        print(f"anymatix: deleted hashes: {deleted}")
+    return web.Response(status=200)
+
+
+@routes.get("/anymatix/cache_size")
+async def serve_cache_size(request):
+    result = await count_outputs(outdir)
+    return web.json_response(result)
+
+
+@routes.post("/anymatix/delete_resource")
+async def serve_delete(request):
+    """Delete a model sidecar JSON and its associated model file.
+
+    Security constraints:
+    - Only files within ComfyUI's registered model scan roots are touched.
+    - Path traversal is rejected (resolved paths must stay inside a scan root).
+    - Deletion is atomic: both sidecar + model are collected first, then both
+      deleted.  If the model file cannot be removed the sidecar is kept too.
+    """
+    data = await request.json()
+    url = data.get("url")
+    if not isinstance(url, str) or not url:
+        return web.Response(text="Missing or invalid 'url' field", status=400)
+
+    scan_roots = _get_model_scan_roots()
+    log_lines = [f"url={url[:120]}", f"scan_roots={len(scan_roots)}"]
+
+    def _is_inside_scan_root(path: str) -> bool:
+        """Return True when *path* resolves inside one of the scan roots."""
+        rp = os.path.normcase(os.path.abspath(path))
+        return any(
+            rp == os.path.normcase(root) or rp.startswith(os.path.normcase(root) + os.sep)
+            for root in scan_roots
+        )
+
+    # Locate the sidecar JSON(s) whose stored "url" matches the requested URL.
+    # Use a set of normalised sidecar paths to deduplicate overlapping scan roots.
+    seen_sidecars: set[str] = set()
+    targets: list[tuple[str, str | None]] = []
+
+    for root in scan_roots:
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                if not fname.endswith(".json"):
+                    continue
+                json_path = os.path.join(dirpath, fname)
+                norm_path = os.path.normcase(os.path.abspath(json_path))
+                if norm_path in seen_sidecars:
+                    continue
+                try:
+                    with open(json_path, "r") as f:
+                        sidecar = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(sidecar, dict):
+                    continue
+                base_url = sidecar.get("url")
+                if not isinstance(base_url, str):
+                    continue
+                # Match exact URL or URL-with-query-params variant
+                if url != base_url and not url.startswith(base_url + "?") and not url.startswith(base_url + "&"):
+                    continue
+
+                seen_sidecars.add(norm_path)
+
+                # Validate the sidecar path is inside a scan root
+                if not _is_inside_scan_root(json_path):
+                    msg = f"BLOCKED sidecar outside roots: {json_path}"
+                    print(f"[delete_resource] {msg}")
+                    log_lines.append(msg)
+                    continue
+
+                model_path = None
+                model_file = sidecar.get("file_name")
+                if isinstance(model_file, str) and model_file:
+                    candidate = os.path.join(dirpath, model_file)
+                    abs_candidate = os.path.abspath(candidate)
+                    if not _is_inside_scan_root(abs_candidate):
+                        msg = f"BLOCKED model outside roots: {abs_candidate}"
+                        print(f"[delete_resource] {msg}")
+                        log_lines.append(msg)
+                        continue
+                    if os.path.isfile(abs_candidate):
+                        # Check if another sidecar still references this model file
+                        referenced = False
+                        for other in filenames:
+                            if other.endswith(".json") and other != fname:
+                                try:
+                                    with open(os.path.join(dirpath, other), "r") as of:
+                                        other_data = json.load(of)
+                                    if isinstance(other_data, dict) and other_data.get("file_name") == model_file:
+                                        referenced = True
+                                        break
+                                except Exception:
+                                    pass
+                        if referenced:
+                            log_lines.append(f"model shared, sidecar-only: {fname}")
+                        else:
+                            model_path = abs_candidate
+                    else:
+                        log_lines.append(f"model file missing on disk: {model_file}")
+
+                targets.append((os.path.abspath(json_path), model_path))
+
+    log_lines.append(f"targets={len(targets)}")
+
+    if not targets:
+        summary = " | ".join(log_lines) + " | NOT FOUND"
+        print(f"[delete_resource] {summary}")
+        return web.Response(text=summary, status=404)
+
+    # Atomic delete: attempt model file first, then sidecar.
+    # If the model file cannot be removed, skip both.
+    errors = []
+    deleted_sidecars = []
+    deleted_models = []
+    for sidecar_path, model_path in targets:
+        try:
+            if model_path:
+                os.remove(model_path)
+                deleted_models.append(os.path.basename(model_path))
+                print(f"[delete_resource] deleted model: {model_path}")
+            os.remove(sidecar_path)
+            deleted_sidecars.append(os.path.basename(sidecar_path))
+            print(f"[delete_resource] deleted sidecar: {sidecar_path}")
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+            print(f"[delete_resource] ERROR: {e}")
+
+    log_lines.append(f"deleted_sidecars={deleted_sidecars}")
+    log_lines.append(f"deleted_models={deleted_models}")
+    if errors:
+        log_lines.append(f"errors={errors}")
+
+    summary = " | ".join(log_lines)
+    print(f"[delete_resource] {summary}")
+
+    if errors and not deleted_sidecars:
+        return web.Response(text=summary, status=500)
+    return web.Response(text=summary, status=200)
+
+
+@routes.get("/anymatix/{basedir}/{filename:.+}")
+async def serve_file(request):
+    response = web.Response(text="File not found", status=404)
+
+    # TODO: check also dirmap in anymatix_checkpoint_fetcher, reconcile that with "allowed_dirs"
+    basedir = request.match_info["basedir"]
+
+    if basedir in allowed_dirs:
+        # TODO: the check on getcwd is plain wrong (if the cwd is not what I expected). Determine from the current script?
+        file_path = os.path.abspath(f"{basedir}/{request.match_info['filename']}")
+        base = os.path.abspath(os.path.join(os.getcwd(), basedir))
+        if (
+            file_path.startswith(base)
+            and os.path.isfile(file_path)
+            and os.access(file_path, os.R_OK)
+        ):
+            # Serving a result renews its TTL, so a download in progress (file
+            # by file, resumable) is never swept away mid-transfer.
+            #
+            # realpath on both sides: file_path came from abspath, which resolves
+            # nothing but inherits an already-resolved cwd, while outdir keeps the
+            # path as configured. One symlink anywhere above the output directory
+            # (/var -> /private/var on macOS, a volume mount on a pod) and a
+            # plain string comparison silently never matches.
+            results_root = os.path.realpath(outdir)
+            real_file_path = os.path.realpath(file_path)
+            if real_file_path.startswith(results_root + os.sep):
+                touch_result(
+                    outdir,
+                    os.path.relpath(real_file_path, results_root).split(os.sep)[0],
+                )
+            response = web.FileResponse(file_path)
+        # else:
+        #     print("****** anymatix", file_path, "is not allowed or does not exist", os.getcwd())
+
+    return response
+
+
+# resource_extensions = [".ckpt", ".safetensors"]
+
+
+def _get_model_scan_roots():
+    """Return deduplicated list of all directories that may contain model files/sidecars.
+    All returned paths are normalised (abspath + normcase) for reliable comparison on Windows.
+    """
+    models_dir_abs = os.path.normcase(os.path.abspath(folder_paths.models_dir))
+    seen: set[str] = set()
+    roots: list[str] = []
+    if os.path.isdir(models_dir_abs):
+        seen.add(models_dir_abs)
+        roots.append(models_dir_abs)
+
+    def is_models_path(path: str) -> bool:
+        nc = os.path.normcase(os.path.abspath(path))
+        marker = f"{os.sep}models{os.sep}"
+        return nc.endswith(f"{os.sep}models") or marker in nc
+
+    for info in folder_paths.folder_names_and_paths.values():
+        for base_dir in info[0]:
+            if os.path.isdir(base_dir) and is_models_path(base_dir):
+                nc = os.path.normcase(os.path.abspath(base_dir))
+                if nc not in seen:
+                    seen.add(nc)
+                    roots.append(os.path.abspath(base_dir))
+    return roots
+
+
+@routes.get("/anymatix/resources")
+async def serve_resources(_request):
+    models_dir = folder_paths.models_dir
+    models_dir_abs = os.path.abspath(models_dir)
+    print(f"[anymatix resources] models_dir = {models_dir}")
+    print(f"[anymatix resources] models_dir exists = {os.path.isdir(models_dir)}")
+
+    scan_roots = _get_model_scan_roots()
+
+    print(f"[anymatix resources] scan_roots count = {len(scan_roots)}")
+    print(f"[anymatix resources] scan_roots sample = {scan_roots[:10]}")
+
+    json_file_seen: set[str] = set()
+    json_file_list: list[str] = []
+    for root in scan_roots:
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                if filename.endswith(".json"):
+                    fpath = os.path.join(dirpath, filename)
+                    norm = os.path.normcase(os.path.abspath(fpath))
+                    if norm not in json_file_seen:
+                        json_file_seen.add(norm)
+                        json_file_list.append(fpath)
+
+    json_file_list.sort()
+
+    print(f"[anymatix resources] found {len(json_file_list)} JSON sidecar files")
+    if len(json_file_list) == 0:
+        # List top-level contents for debugging
+        try:
+            top_level = os.listdir(models_dir)
+            print(f"[anymatix resources] top-level in models_dir: {top_level[:20]}")
+            # Check first subfolder
+            for sub in top_level[:5]:
+                sub_path = os.path.join(models_dir, sub)
+                if os.path.isdir(sub_path):
+                    sub_contents = os.listdir(sub_path)[:10]
+                    print(f"[anymatix resources]   {sub}/ has {len(os.listdir(sub_path))} items: {sub_contents}")
+        except Exception as e:
+            print(f"[anymatix resources] error listing models_dir: {e}")
+
+    def get_json_data(path: str) -> dict:
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def get_type(path: str) -> str:
+        abs_path = os.path.abspath(path)
+        for model_type, info in folder_paths.folder_names_and_paths.items():
+            for base_dir in info[0]:
+                abs_base = os.path.abspath(base_dir)
+                if abs_path == abs_base or abs_path.startswith(abs_base + os.sep):
+                    return model_type
+
+        rel = abs_path.removeprefix(models_dir_abs)
+        parts = rel.split(os.sep)
+        if len(parts) > 1 and parts[1]:
+            return parts[1]
+        return "unknown"
+
+    def is_valid_sidecar(data: dict) -> bool:
+        return isinstance(data, dict) and isinstance(data.get("file_name"), str) and len(data.get("file_name")) > 0
+
+    def get_contents(path: str):
+        data = get_json_data(path)
+        if not is_valid_sidecar(data):
+            raise ValueError("not a model sidecar")
+        type = get_type(path)
+        # file_size MUST always come from the actual file on disk,
+        # never from sidecar data (which reflects Content-Length at download time)
+        model_filename = data.get("file_name")
+        if model_filename:
+            model_path = os.path.join(os.path.dirname(path), model_filename)
+            if os.path.isfile(model_path):
+                data["file_size"] = os.path.getsize(model_path)
+                # Last USE, not last download: the fetcher touches a model's
+                # mtime on every resolve, so this orders storage-full pruning
+                # by what the user's workflows want least.
+                data["mtime"] = os.path.getmtime(model_path)
+        return (data, type)
+
+    result: Dict[str, list] = {}
+    errors = 0
+    skipped = 0
+
+    for json_path in json_file_list:
+        try:
+            data, type = get_contents(json_path)
+            if type in result:
+                result[type].append(data)
+            else:
+                result[type] = [data]
+        except ValueError:
+            skipped += 1
+        except Exception as e:
+            errors += 1
+            if errors <= 3:
+                print(f"[anymatix resources] error processing {json_path}: {e}")
+
+    total_items = sum(len(v) for v in result.values())
+    print(f"[anymatix resources] returning {total_items} items across {len(result)} categories (skipped: {skipped}, errors: {errors})")
+
+    return web.json_response(result)

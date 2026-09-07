@@ -1,0 +1,58 @@
+# DROP THIS AT THE ROOT OF anymatix-comfy-nodes, THEN `comfy node publish`.
+#
+# The pack has NO pyproject.toml at the pinned commit (4383c3da, re-checked
+# 2026-09-07 — raw.githubusercontent answered 404), so this file is added, not
+# merged.
+#
+# EVERY FIELD IS ONE THE PARSER READS, and the parser was read, not remembered:
+# ComfyUI's own `comfy_config/types.py` at the commit `app/PIN.json` pins
+# (2f35f4a0), classes `ProjectConfig`, `License`, `URLs` and `ComfyConfig`.
+# Its header says these definitions must stay synchronised with comfy-cli's
+# `comfy_cli/registry/types.py`, which is the same shape.
+#
+# `name` IS the registry id and it is permanent — a rename is a new node, not
+# an edit. `PublisherId` must be a publisher that EXISTS: on 2026-09-07
+# https://api.comfy.org/publishers/anymatix still answered 404, so the
+# publisher has to be claimed at registry.comfy.org before this can succeed.
+#
+# `dependencies` is the pack's own requirements.txt with the prose stripped —
+# compared line by line against requirements.txt at the same pinned commit on
+# 2026-09-07, nine packages, no drift. The registry installs from THIS list.
+#
+# `license = { file = "LICENSE" }` resolves: LICENSE is present at the pinned
+# commit and is GPL-3.0 (re-checked 2026-09-07).
+#
+# This file is checked by `app/src/scripts/checkRegistryManifest.ts`
+# (`yarn check:registry-manifest`), which parses it, holds every field above to
+# the pack's own sources at the commit PIN.json pins, and refuses to pass while
+# it carries anything a TOML parser cannot read. It was added because this file
+# sat here for a day with git conflict markers in it, unparseable, while the
+# item said it had been verified.
+
+[project]
+name = "anymatix-comfy-nodes"
+description = "The nodes Anymatix runs on: URL-addressed model loaders that download what a workflow asks for, plus CLIPSeg, masking, SAM2 coordinates and the save nodes Anymatix reads its results from."
+version = "1.0.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "imageio-ffmpeg>=0.4.7",
+    "numpy>=1.19.0",
+    "av>=16.0.1",
+    "scikit-image",
+    "opencv-python>=4.5.0",
+    "Pillow>=8.0.0",
+    "aiohttp>=3.8.0",
+    "aiofiles>=0.8.0",
+    "shapely",
+]
+
+[project.urls]
+Repository = "https://github.com/Anymatix/anymatix-comfy-nodes"
+Homepage = "https://www.anymatix.com"
+
+[tool.comfy]
+PublisherId = "anymatix"
+DisplayName = "Anymatix"
+Icon = ""
+includes = []
