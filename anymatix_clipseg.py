@@ -101,6 +101,42 @@ def ensure_clipseg_model() -> str:
     return model_dir
 
 
+def blur_heatmap(preds, blur):
+    """Box-blur a 2-D CLIPSeg heat map, WITHOUT inventing pixels outside the frame.
+
+    `F.avg_pool2d` pads with zeros, and PyTorch's `count_include_pad` defaults
+    to **True**, so those invented zeros land in the denominator. Every pixel
+    within `kernel_size // 2` of an edge is then averaged against a strip of
+    nothing and pulled towards 0 — and the `> threshold` on the next line in
+    `segment()` cuts exactly there. Measured on a uniform heat map of 0.9 at
+    the shipped `blur = 6` (kernel 13): a corner came out **0.261** and a
+    mid-edge pixel **0.485**, against the shipped threshold of 0.4. So any
+    object touching the frame lost its border from the mask.
+
+    `count_include_pad=False` divides by the number of REAL pixels the window
+    covered, which is what "smooth the heat map" means at a boundary: the same
+    0.9 comes out 0.900 everywhere, edges and corners included. Nothing away
+    from the border moves by a bit.
+
+    See `TRACKERS/BUGS/mask-blur-eats-mask-frame-border` in the app repository,
+    and `tests/test_clipseg_blur.py` here, which fails under the old keyword.
+    """
+    import torch.nn.functional as F
+
+    if blur <= 0:
+        return preds
+
+    kernel_size = int(blur) * 2 + 1
+    padding = kernel_size // 2
+    return F.avg_pool2d(
+        preds.unsqueeze(0).unsqueeze(0),
+        kernel_size=kernel_size,
+        stride=1,
+        padding=padding,
+        count_include_pad=False,
+    ).squeeze()
+
+
 class AnymatixCLIPSeg:
     @classmethod
     def INPUT_TYPES(cls):
@@ -149,17 +185,7 @@ class AnymatixCLIPSeg:
             align_corners=False,
         ).squeeze()
 
-        if blur > 0:
-            kernel_size = int(blur) * 2 + 1
-            if kernel_size % 2 == 0:
-                kernel_size += 1
-            padding = kernel_size // 2
-            preds = F.avg_pool2d(
-                preds.unsqueeze(0).unsqueeze(0),
-                kernel_size=kernel_size,
-                stride=1,
-                padding=padding,
-            ).squeeze()
+        preds = blur_heatmap(preds, blur)
 
         mask = (preds > threshold).float()
 
