@@ -1,33 +1,37 @@
-# DROP THIS AT THE ROOT OF anymatix-comfy-nodes, THEN `comfy node publish`.
-#
-# The pack has NO pyproject.toml at the pinned commit (4383c3da, re-checked
-# 2026-09-07 — raw.githubusercontent answered 404), so this file is added, not
-# merged.
+# The Comfy registry manifest for this pack. `comfy node publish` reads it from
+# this directory and nowhere else.
 #
 # EVERY FIELD IS ONE THE PARSER READS, and the parser was read, not remembered:
-# ComfyUI's own `comfy_config/types.py` at the commit `app/PIN.json` pins
-# (2f35f4a0), classes `ProjectConfig`, `License`, `URLs` and `ComfyConfig`.
-# Its header says these definitions must stay synchronised with comfy-cli's
-# `comfy_cli/registry/types.py`, which is the same shape.
+# comfy-cli's `comfy_cli/registry/types.py` and `config_parser.py`, whose shape
+# ComfyUI's own `comfy_config/types.py` is required to mirror. Re-read against
+# comfy-cli 1.20.0 on 2026-09-09.
 #
 # `name` IS the registry id and it is permanent — a rename is a new node, not
-# an edit. `PublisherId` must be a publisher that EXISTS: on 2026-09-07
-# https://api.comfy.org/publishers/anymatix still answered 404, so the
-# publisher has to be claimed at registry.comfy.org before this can succeed.
+# an edit. It is also what every Anymatix export writes into its `requires`
+# line and into `aux_id`, so changing it would make the exports disagree with
+# the registry.
 #
-# `dependencies` is the pack's own requirements.txt with the prose stripped —
-# compared line by line against requirements.txt at the same pinned commit on
-# 2026-09-07, nine packages, no drift. The registry installs from THIS list.
+# `PublisherId` must name a publisher that EXISTS: `anymatix` was claimed on
+# 2026-09-07 and `https://api.comfy.org/publishers/anymatix` answers 200.
 #
-# `license = { file = "LICENSE" }` resolves: LICENSE is present at the pinned
-# commit and is GPL-3.0 (re-checked 2026-09-07).
+# `dependencies` is this pack's own requirements.txt with the prose stripped —
+# nine packages, compared line by line at this commit. The registry installs
+# from THIS list, not from requirements.txt.
 #
-# This file is checked by `app/src/scripts/checkRegistryManifest.ts`
-# (`yarn check:registry-manifest`), which parses it, holds every field above to
-# the pack's own sources at the commit PIN.json pins, and refuses to pass while
-# it carries anything a TOML parser cannot read. It was added because this file
-# sat here for a day with git conflict markers in it, unparseable, while the
-# item said it had been verified.
+# `license = { file = "LICENSE" }` resolves: LICENSE is present here and is
+# GPL-3.0.
+#
+# `Icon` must be a URL, not a path — the publish payload sends the string
+# through unchanged. It points at `icon.png` in this repository, which is the
+# Anymatix application icon (`app/resources/icon.icns`) at 512x512.
+#
+# THREE REGISTRY FIELDS CANNOT BE SET FROM THIS FILE, and are not omissions:
+# `author` and `tags` are node fields the publish payload never carries (see
+# `registry/api.py:publish_node_version`), so they are set with
+# `PUT /publishers/anymatix/nodes/anymatix-comfy-nodes`. `category` is marked
+# `deprecated` in the registry's own OpenAPI — "Use 'tags' field instead. This
+# field will be removed in a future version" — so it is deliberately left
+# empty.
 
 [project]
 name = "anymatix-comfy-nodes"
@@ -54,5 +58,5 @@ Homepage = "https://www.anymatix.com"
 [tool.comfy]
 PublisherId = "anymatix"
 DisplayName = "Anymatix"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/Anymatix/anymatix-comfy-nodes/main/icon.png"
 includes = []
