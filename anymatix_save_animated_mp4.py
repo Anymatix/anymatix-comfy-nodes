@@ -12,6 +12,11 @@ from .anymatix_output_formats import (
     video_codec_args,
     video_container,
 )
+from .anymatix_frame_integrity import (
+    FramesAreNotAPicture,
+    describe_frames_that_are_not_a_picture,
+    nonfinite_count,
+)
 
 # Dev/instrumentation: one tag for grepping ComfyUI logs
 _DBG = "[ANYMATIX_SAVE_MP4]"
@@ -389,14 +394,26 @@ class AnymatixSaveAnimatedMP4:
                 try:
                     for _fi, image in enumerate(images):
                         _arr = image.detach().cpu().float().numpy()
-                        if not np.isfinite(_arr).all():
-                            _bad_count = int(np.sum(~np.isfinite(_arr)))
+                        # A frame with no numbers in it is a failed generation,
+                        # and it stops here. The log line is what made this
+                        # findable in the first place, so it stays.
+                        _bad_count = nonfinite_count(_arr)
+                        if _bad_count:
                             _save_mp4_dbg(
                                 "FRAME_NONFINITE",
                                 f"encoder={encoder_candidate['name']!r} frame_index={_fi} "
                                 f"bad_count={_bad_count}",
                             )
-                            _arr = np.nan_to_num(_arr, nan=0.0, posinf=1.0, neginf=0.0)
+                            raise FramesAreNotAPicture(
+                                describe_frames_that_are_not_a_picture(
+                                    frame_index=_fi,
+                                    bad_count=_bad_count,
+                                    total_values=int(_arr.size),
+                                    total_frames=total_frames,
+                                    shape=tuple(_arr.shape),
+                                    encoder=encoder_candidate['name'],
+                                )
+                            )
                         _arr = np.clip(_arr, 0.0, 1.0)
                         img_np = np.rint(255.0 * _arr).astype(np.uint8)
                         process.stdin.write(img_np.tobytes())
@@ -405,6 +422,35 @@ class AnymatixSaveAnimatedMP4:
                     process.stdin.close()
                     process.stdin = None
                     stdout, stderr = process.communicate(timeout=300)
+                except FramesAreNotAPicture:
+                    # NOT an encoder failure, so it does not go round the
+                    # candidate loop: a second encoder cannot put numbers back
+                    # into a tensor that has none. Tear down what this attempt
+                    # started, leave no file at either path, and let the run
+                    # fail with the message the exception already carries.
+                    try:
+                        if process is not None and process.stdin is not None:
+                            try:
+                                process.stdin.close()
+                            except Exception:
+                                pass
+                            process.stdin = None
+                        if process is not None:
+                            process.kill()
+                    except Exception:
+                        pass
+                    try:
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                    except OSError:
+                        pass
+                    if temp_dir is not None:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    _save_mp4_dbg(
+                        "RETURN",
+                        f"path=FRAMES_ARE_NOT_A_PICTURE encoder={encoder_candidate['name']!r} raising",
+                    )
+                    raise
                 except Exception as encoder_error:
                     last_error = encoder_error
                     _stderr_txt = ""
@@ -530,6 +576,13 @@ class AnymatixSaveAnimatedMP4:
             print("Error: FFmpeg encoding timed out (>5 minutes)")
             _save_mp4_dbg("RETURN", "path=FFMPEG_TIMEOUT ui_images=0")
             return {"ui": {"images": [], "animated": (True,)}}
+        except FramesAreNotAPicture:
+            # The one failure in this node that is REPORTED rather than
+            # swallowed. Every `return {"ui": {"images": []}}` below and above
+            # ends the run as a success with nothing in it; that shape is what
+            # produced a black clip nobody could explain, and it is not
+            # extended to a generation that produced no picture at all.
+            raise
         except Exception as e:
             print(f"Error during FFmpeg encoding: {str(e)}")
             _save_mp4_dbg("RETURN", f"path=TOP_EXCEPTION err={e!r} ui_images=0")
