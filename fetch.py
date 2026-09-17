@@ -379,6 +379,38 @@ def satisfied_by_sidecar(dirpath: str, data: dict) -> Optional[str]:
         return None
 
 
+# The three things `download_file` can make a person wait on, and the only
+# words `phase` is ever called with. The app maps two of them to a label; the
+# third is the item's own name, which already says "Fetch ...".
+FETCH_PHASES = ("fetching", "verifying", "adopting")
+
+
+def fetch_phase_message(node_id, prompt_id, phase: str, value: int, maximum: int) -> Optional[dict]:
+    """The `anymatix.fetch_phase` payload, or None when there is nobody to tell.
+
+    Here, beside the vocabulary it uses, so the words and their wire form
+    cannot drift apart — and as a pure function so the one field that is easy
+    to forget can be pinned by a test.
+
+    `prompt_id` IS THAT FIELD. The app's global websocket dispatcher routes
+    every message by it and drops the ones that have none, so a phase sent
+    without a prompt id would be built, sent, and silently never arrive. It was
+    caught by the app's typecheck rather than by anyone watching a bar, which
+    is the only reason it is not in the shipped build.
+    """
+    if node_id is None or prompt_id is None:
+        return None
+    if phase not in FETCH_PHASES:
+        return None
+    return {
+        "node": str(node_id),
+        "prompt_id": str(prompt_id),
+        "phase": phase,
+        "value": int(value),
+        "max": int(maximum),
+    }
+
+
 def satisfied_locally(dirs, urls) -> Optional[str]:
     """The model one of these urls already resolves to, found without asking
     anybody anything — or None.

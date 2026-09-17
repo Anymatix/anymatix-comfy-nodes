@@ -21,11 +21,11 @@ import time
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
-    from .fetch import download_file, hash_string, satisfied_locally
+    from .fetch import download_file, fetch_phase_message, hash_string, satisfied_locally
 except Exception:
     # When running this file directly for testing, fall back to absolute import
     try:
-        from fetch import download_file, hash_string, satisfied_locally
+        from fetch import download_file, fetch_phase_message, hash_string, satisfied_locally
     except Exception:
         # Provide a helpful error when import truly fails
         raise
@@ -476,15 +476,14 @@ def _send_fetch_phase(phase: str, value: int, maximum: int) -> None:
     if instance is None:
         return
     context = get_executing_context()
-    node_id = getattr(context, "node_id", None) if context else None
-    if node_id is None:
+    message = fetch_phase_message(
+        getattr(context, "node_id", None) if context else None,
+        getattr(context, "prompt_id", None) if context else None,
+        phase, value, maximum,
+    )
+    if message is None:
         return
-    instance.send_sync("anymatix.fetch_phase", {
-        "node": str(node_id),
-        "phase": phase,
-        "value": int(value),
-        "max": int(maximum),
-    })
+    instance.send_sync("anymatix.fetch_phase", message)
 
 
 def _mirror_cache_entry_to_volume(cache_dir: str, durable_dir: str, model_basename: str) -> None:

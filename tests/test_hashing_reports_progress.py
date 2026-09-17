@@ -25,7 +25,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fetch
-from fetch import compute_file_sha256, download_file, hash_string
+from fetch import compute_file_sha256, download_file, fetch_phase_message, hash_string
 
 
 URL = ("https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/"
@@ -300,3 +300,41 @@ def test_a_fetch_with_no_listener_still_works(monkeypatch):
         got = download_file(url=URL, dir=d)
         with open(got, "rb") as f:
             assert f.read() == payload
+
+
+# --------------------------------------------------------------------------
+# The message that carries the phase to the app
+
+
+def test_the_phase_message_carries_the_prompt_id():
+    """THE FIELD THAT WAS EASY TO FORGET, AND ONCE WAS.
+
+    The app's global websocket dispatcher routes every message by `prompt_id`
+    and drops the ones that have none, so a phase sent without it is built,
+    sent, and silently never arrives. The first cut of this work omitted it and
+    the app's typecheck caught it, not a person watching a bar.
+    """
+    message = fetch_phase_message("7", "abc-123", "verifying", 400, 1000)
+    assert message == {
+        "node": "7",
+        "prompt_id": "abc-123",
+        "phase": "verifying",
+        "value": 400,
+        "max": 1000,
+    }
+
+
+def test_no_prompt_id_and_no_node_means_no_message():
+    # Outside a running prompt there is nobody to tell, which is a normal state
+    # for the fetcher's own tests rather than an error.
+    assert fetch_phase_message(None, "abc-123", "verifying", 0, 1000) is None
+    assert fetch_phase_message("7", None, "verifying", 0, 1000) is None
+
+
+def test_only_the_three_words_the_fetcher_actually_uses_are_sent():
+    assert fetch.FETCH_PHASES == ("fetching", "verifying", "adopting")
+    for phase in fetch.FETCH_PHASES:
+        assert fetch_phase_message("7", "p", phase, 0, 1000) is not None
+    # A typo must not reach the app, where an unknown word falls back to the
+    # item's name and the wait goes unexplained again.
+    assert fetch_phase_message("7", "p", "verifiying", 0, 1000) is None
