@@ -244,7 +244,7 @@ def adoption_candidates(dirs, canonical_name: str, sha256: str, self_sidecar: st
         if expected_size is None:
             continue
         for item in entries:
-            if item.endswith(".json") or item.endswith(".part"):
+            if item.endswith(".json") or item.endswith(".part") or item.endswith(".complete"):
                 continue
             if ext and not item.endswith(ext):
                 continue
@@ -602,6 +602,9 @@ class SegmentDownloader:
         """Assemble segments into final file with integrity verification"""
         try:
             missing_segments = []
+            # The file about to be rewritten is not the file any earlier
+            # completion record describes.
+            clear_part_completion(self.file_path)
             with open(self.file_path, 'wb') as output_file:
                 for i in range(len(self.active_segments)):
                     segment_path = self.active_segments.get(i)
@@ -626,7 +629,11 @@ class SegmentDownloader:
             final_size = os.path.getsize(self.file_path)
             if final_size != self.total_size:
                 raise Exception(f"File size mismatch after assembly: expected {self.total_size}, got {final_size}")
-            
+
+            # Every segment landed and was written in order: this path knows it
+            # finished, so it says so where a later process can read it.
+            mark_part_complete(self.file_path, self.total_size)
+
             return True
             
         except Exception as e:
@@ -641,6 +648,7 @@ class SegmentDownloader:
             try:
                 if os.path.exists(self.file_path):
                     os.remove(self.file_path)
+                    clear_part_completion(self.file_path)
             except:
                 pass
             raise Exception(f"Failed to assemble downloaded file: {e}") from e
@@ -790,6 +798,11 @@ class AsyncParallelDownloader:
                 # `bugs/the-parallel-download-writes-part-part-can`.
                 part_path = self.file_path
                 os.makedirs(os.path.dirname(part_path) or ".", exist_ok=True)
+                # THE MOMENT THIS RUNS, THE FILE IS THE RIGHT SIZE AND EMPTY.
+                # Any completion recorded for an earlier part file at this path
+                # describes bytes that no longer exist, so it goes first: a
+                # marker that survives its own bytes is how a hole gets adopted.
+                clear_part_completion(part_path)
                 async with aiofiles.open(part_path, 'wb') as prealloc:
                     await prealloc.truncate(self.total_size)
 
@@ -845,6 +858,7 @@ class AsyncParallelDownloader:
                             )
                         elif os.path.exists(part_path):
                             os.remove(part_path)
+                            clear_part_completion(part_path)
                     except Exception as salvage_error:
                         print(f"[ANYMATIX DOWNLOAD] Could not keep the partial download: {salvage_error}")
 
@@ -862,6 +876,13 @@ class AsyncParallelDownloader:
                 # Again no rename, and for the same reason: the caller's
                 # `finalize_download` is the ONE place a `.part` earns the
                 # model's name.
+                #
+                # THIS IS THE ONLY MOMENT ANYTHING KNOWS THE DOWNLOAD FINISHED.
+                # Every segment returned without raising and the file is the
+                # declared length: written down here, that fact survives the
+                # process. Until 2026-09-17 it was printed and forgotten, and
+                # the next run had nothing but the size to go on.
+                mark_part_complete(part_path, self.total_size)
 
                 if progress_bar:
                     progress_bar.close()
@@ -891,6 +912,7 @@ class AsyncParallelDownloader:
                 stale = self.file_path
                 if self.kept_prefix <= 0 and os.path.exists(stale):
                     os.remove(stale)
+                    clear_part_completion(stale)
             except Exception:
                 pass
             # Re-raise exception to propagate to node
@@ -1178,6 +1200,9 @@ def delete_files(url, dir):
                 part = part_path_for(model_path)
                 if os.path.exists(part):
                     remove(part, "partial download")
+                marker = completion_marker_for(part)
+                if os.path.exists(marker):
+                    remove(marker, "completion record")
             remove(os.path.join(root, f), "sidecar JSON")
 
         # An orphan sweep for what this url left behind before sidecars
@@ -1226,6 +1251,108 @@ def part_path_for(file_path: str) -> str:
     return file_path + ".part"
 
 
+def completion_marker_for(part_path: str) -> str:
+    """Where a downloader records that it wrote the LAST byte of a part file."""
+    return part_path + ".complete"
+
+
+def mark_part_complete(part_path: str, total_size) -> None:
+    """Record that this part file was written to its end.
+
+    SIZE IS NOT EVIDENCE, and for a parallel download it never was: the part
+    file is pre-allocated to the final length before the first byte arrives
+    (`AsyncParallelDownloader.download_async`), so from the first instant to
+    the last it wears the right size and the wrong contents. On fmt-5000,
+    2026-09-17, ComfyUI died mid-transfer and the next run adopted a 12 GB
+    z-image weight of exactly the declared 12,309,866,400 bytes whose sha256
+    was `50638dd8...` where Hugging Face states `24076130...`; the card
+    rendered uniform noise and reported success.
+
+    The downloader is the only thing that KNOWS, and it used to print the fact
+    ("Parallel download completed successfully") and throw it away. This is
+    that fact, written where the next process can read it.
+    """
+    marker = completion_marker_for(part_path)
+    try:
+        with open(marker, "w") as f:
+            json.dump({"size": total_size, "completed_at": time.time()}, f)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        # A completion we failed to record costs a re-download, which is the
+        # safe direction to fail in. It is worth a line, not an exception.
+        print(f"[ANYMATIX DOWNLOAD] Could not record the completion of "
+              f"{os.path.basename(part_path)}: {e}")
+
+
+def clear_part_completion(part_path: str) -> None:
+    """Forget any recorded completion for this part file.
+
+    Called wherever the bytes change or go: a marker that outlives the bytes it
+    describes is worse than none, because the next run believes it.
+    """
+    try:
+        os.remove(completion_marker_for(part_path))
+    except OSError:
+        pass
+
+
+def part_completion_is_recorded(part_path: str, expected_size) -> bool:
+    """Whether the downloader that wrote this part file said it finished it."""
+    data = read_sidecar(completion_marker_for(part_path))
+    if not data:
+        return False
+    if expected_size is None:
+        return True
+    try:
+        return int(data.get("size", -1)) == int(expected_size)
+    except (TypeError, ValueError):
+        return False
+
+
+def resumed_part_is_the_whole_file(part_file: str, expected_size, remote_sha256,
+                                   label: str) -> bool:
+    """Whether a full-size `.part` found on disk really holds the file.
+
+    The question this replaces was `os.path.getsize(part) == file_size`, which
+    is true of a parallel download from its first byte onwards. Two things can
+    answer it honestly, and nothing else can:
+
+    1. THE SERVER'S OWN HASH, where it stated one — `X-Linked-Etag` at Hugging
+       Face, `hashes.SHA256` in Civitai's metadata. This is the same proof
+       `adopt_existing_file` performs on a candidate before reusing it, and a
+       resumed part file deserves no less. It outranks the marker: a marker
+       says the bytes all arrived, a hash says they are the right bytes.
+    2. THE DOWNLOADER'S OWN RECORD (`mark_part_complete`), for the servers that
+       state nothing. It covers the case the old size test was written for —
+       the process died between the last byte and the rename.
+
+    Neither available means the file is not provable, and an unprovable weight
+    is how a card comes to render static. The caller discards it and downloads
+    again; a SHORT part file is untouched by all this and still resumes from
+    its real prefix, which is the whole reason the `.part` scheme exists.
+    """
+    if remote_sha256:
+        try:
+            actual = compute_file_sha256(part_file).lower()
+        except OSError as e:
+            print(f"[ANYMATIX DOWNLOAD] Could not hash the resumed part file for {label}: {e}")
+            return False
+        if actual == remote_sha256:
+            print(f"[ANYMATIX DOWNLOAD] The resumed part file for {label} hashes to "
+                  f"{actual}, which is what the server states")
+            return True
+        print(f"[ANYMATIX DOWNLOAD] The resumed part file for {label} hashes to {actual}, "
+              f"not the {remote_sha256} the server states - discarding it")
+        return False
+    if part_completion_is_recorded(part_file, expected_size):
+        print(f"[ANYMATIX DOWNLOAD] The downloader recorded {label} as complete before it died")
+        return True
+    print(f"[ANYMATIX DOWNLOAD] A full-size part file for {label} with no completion record "
+          f"and no server hash to check it against proves nothing - downloading again")
+    return False
+
+
 def finalize_download(part: str, file_path: str, expected_size, label: str) -> str:
     """
     Give the `.part` its real name, and only if it earned it.
@@ -1244,6 +1371,10 @@ def finalize_download(part: str, file_path: str, expected_size, label: str) -> s
             f"Kept as {os.path.basename(part)} to resume from."
         )
     os.replace(part, file_path)
+    # The bytes have a name now; the note saying they were finished has nothing
+    # left to describe, and a stale one would vouch for the NEXT part file
+    # written at this path.
+    clear_part_completion(part)
     return file_path
 
 
@@ -1324,6 +1455,16 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         if target_sha256:
             data["sha256"] = target_sha256  # Pre-set it
 
+        # WHAT THE SERVER ITSELF STATED, and nothing of our own. `target_sha256`
+        # falls back to `data["sha256"]`, which is a hash THIS code measured on
+        # a previous run — fine for finding a file we already have, useless as a
+        # check on bytes we are about to accept, because a corrupt file that was
+        # once canonicalised under its own measurement would then verify against
+        # itself forever. Only `metadata_hash` (Civitai) and `remote_sha256`
+        # (Hugging Face's `X-Linked-Etag`) are somebody else's claim about the
+        # bytes, so only they can catch us being wrong.
+        remote_stated_sha256 = metadata_hash or data.get("remote_sha256")
+
         local_file_size = 0
         part_file = part_path_for(file_path)
 
@@ -1381,6 +1522,27 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             # POST-DOWNLOAD DEDUPLICATION
             print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
             sha256 = compute_file_sha256(file_path).lower()
+
+            # A SIDECAR MUST NEVER STATE A HASH THE SERVER DID NOT.
+            #
+            # Where the server told us what the bytes hash to and ours do not
+            # match, the file is wrong — and naming it by our own measurement
+            # would turn a fault anything could still detect into the store's
+            # permanent idea of what this url serves. That is precisely what
+            # happened to the 12 GB z-image weight on fmt-5000 on 2026-09-17:
+            # recorded as `50638dd8...` where Hugging Face states `24076130...`,
+            # and served to the card, which rendered static.
+            if remote_stated_sha256 and sha256 != remote_stated_sha256:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                raise Exception(
+                    f"Downloaded file does not match the hash the server states for "
+                    f"{data['file_name']}: got {sha256}, expected {remote_stated_sha256}. "
+                    f"The file was removed and will be downloaded again on the next run."
+                )
+
             data["sha256"] = sha256
 
             canonical_name = canonical_model_name(data["file_name"], sha256)
@@ -1423,12 +1585,31 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             if os.path.exists(part_file):
                 local_file_size = os.path.getsize(part_file)
                 if local_file_size == data["file_size"]:
-                    # It was complete and nobody renamed it — the process died
-                    # between the last byte and the rename. Finish the job.
-                    finalize_download(
-                        part_file, file_path, data["file_size"], data["file_name"]
-                    )
-                    return finish_download()
+                    # A FULL-SIZE PART FILE IS A QUESTION, NOT AN ANSWER.
+                    #
+                    # This used to read "it was complete and nobody renamed it",
+                    # which is true of a serial download and meaningless for a
+                    # parallel one: that path pre-allocates the part file to the
+                    # final length before the first byte arrives, so a transfer
+                    # killed at 1% leaves a file of exactly the right size.
+                    # Every large model takes the parallel path.
+                    # bugs/a-parallel-download-pre-allocates-part-file-so
+                    if resumed_part_is_the_whole_file(
+                        part_file, data["file_size"], remote_stated_sha256, data["file_name"]
+                    ):
+                        finalize_download(
+                            part_file, file_path, data["file_size"], data["file_name"]
+                        )
+                        return finish_download()
+                    # Unprovable, and there is no prefix to salvage: the holes
+                    # of a dead parallel download are wherever its segments were
+                    # not, so the only honest offset to resume from is zero.
+                    try:
+                        os.remove(part_file)
+                    except Exception:
+                        pass
+                    clear_part_completion(part_file)
+                    local_file_size = 0
                 if local_file_size > data["file_size"]:
                     # Self-heal: a partial larger than the target is corrupt — almost
                     # always a prior resume where the server ignored our Range header and
@@ -1442,6 +1623,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                         os.remove(part_file)
                     except Exception:
                         pass
+                    clear_part_completion(part_file)
                     local_file_size = 0
         elif data["file_size"] is None and os.path.exists(file_path) and file_path.lower().endswith(".json"):
             if is_valid_json_file(file_path):
@@ -1500,6 +1682,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 # A partial for bytes we now hold is dead weight.
                 if os.path.exists(part_file):
                     os.remove(part_file)
+                clear_part_completion(part_file)
                 return adopted
 
         downloaded_size = local_file_size
@@ -1617,6 +1800,12 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                         if data["file_size"] is not None and downloaded_size == data["file_size"]:
                             mb_final = downloaded_size / (1024 * 1024)
                             print(f"[ANYMATIX DOWNLOAD] Single-stream download completed: {mb_final:.0f}MB")
+                            # One ordered stream wrote every byte it was asked
+                            # for. The rename is the next statement, so this
+                            # note is only ever read when the process dies in
+                            # between — which is the case the old size test was
+                            # written for, and the only one it was right about.
+                            mark_part_complete(part_file, data["file_size"])
                             
             except Exception as e:
                 single_stream_exception = e
@@ -1629,6 +1818,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     try:
                         if os.path.exists(part_file):
                             os.remove(part_file)
+                            clear_part_completion(part_file)
                             print(f"[ANYMATIX DOWNLOAD] Removed partial after failure: {part_file}")
                     except Exception:
                         pass

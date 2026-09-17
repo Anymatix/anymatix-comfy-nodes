@@ -374,6 +374,14 @@ def test_a_download_is_named_by_its_content(monkeypatch):
 def test_a_completed_part_file_is_named_by_its_content_too(monkeypatch):
     # The second path that used to return before the rename: a `.part` already
     # complete because the process died between the last byte and the rename.
+    #
+    # IT NOW HAS TO SAY SO. This test used to hand `download_file` nothing but a
+    # full-size part file, and that was the bug it was unwittingly pinning: a
+    # parallel download pre-allocates its part file, so the size it checked is
+    # true from the first byte onwards. The part file is accepted here because
+    # the downloader recorded its completion, which is a fact about the
+    # transfer rather than about the length of a file.
+    # bugs/a-parallel-download-pre-allocates-part-file-so
     payload = b"interrupted then finished" * 300
     sha = hashlib.sha256(payload).hexdigest()
     url = "https://huggingface.co/x/y/resolve/abc/model.safetensors"
@@ -383,7 +391,9 @@ def test_a_completed_part_file_is_named_by_its_content_too(monkeypatch):
 
     with tempfile.TemporaryDirectory() as d:
         provisional = "model_%s.safetensors" % hash_string(url)
-        _write(os.path.join(d, provisional + ".part"), payload)
+        part = os.path.join(d, provisional + ".part")
+        _write(part, payload)
+        fetch.mark_part_complete(part, len(payload))
         with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
             json.dump({"url": url, "file_name": provisional, "file_size": len(payload)}, f)
 
@@ -392,7 +402,8 @@ def test_a_completed_part_file_is_named_by_its_content_too(monkeypatch):
 
         assert _FakeSession.bytes_served == 0
         assert os.path.basename(got) == "model_%s.safetensors" % sha
-        assert not os.path.exists(os.path.join(d, provisional + ".part"))
+        assert not os.path.exists(part)
+        assert not os.path.exists(fetch.completion_marker_for(part))
 
 
 def test_a_url_serving_different_bytes_is_not_adopted(monkeypatch):
