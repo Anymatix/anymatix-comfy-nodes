@@ -1044,7 +1044,84 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
         raise Exception(f"Parallel download failed: {e}")  from e
 
 
+def sidecar_url_matches(stored_url, url: str) -> bool:
+    """Whether a sidecar's stored base url is the url being deleted.
+
+    `download_file` persists the BASE url and names the sidecar after the
+    EFFECTIVE one (base plus any auth tail), so the two are not interchangeable
+    and a credentialled url is recognised by prefix.
+    """
+    if not isinstance(stored_url, str) or not stored_url:
+        return False
+    return url == stored_url or url.startswith(stored_url + "?") or url.startswith(stored_url + "&")
+
+
+def read_sidecar(path: str) -> Optional[dict]:
+    try:
+        with open(path, "r") as contents:
+            data = json.load(contents)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def model_file_is_spoken_for(dirpath: str, model_file: str, is_doomed) -> bool:
+    """Whether a sidecar that SURVIVES this deletion still names `model_file`.
+
+    THE ONE RULE BOTH DELETION PATHS OBEY, kept in one place because they had
+    drifted: `delete_files` here and `serve_delete` in `__init__.py` are the
+    two ways a model is removed, and a rule written twice is a rule that is
+    right once.
+
+    `is_doomed(filename, data)` says whether that sidecar is going too. A
+    sidecar being deleted in the same breath does not get a vote: when two of
+    them named one file, each counted the other as a referrer, neither
+    released the bytes, and both sidecars were deleted anyway -- leaving the
+    file on disk with nothing pointing at it.
+    """
+    try:
+        entries = os.listdir(dirpath)
+    except OSError:
+        # Cannot read the directory, so cannot prove the file is free.
+        return True
+    for other in entries:
+        if not other.endswith(".json"):
+            continue
+        data = read_sidecar(os.path.join(dirpath, other))
+        if not data or data.get("file_name") != model_file:
+            continue
+        if is_doomed(other, data):
+            continue
+        return True
+    return False
+
+
 def delete_files(url, dir):
+    """Remove one url's model, and ONLY what no other url still needs.
+
+    THE FILE IS SHARED NOW, AND IT DID NOT USED TO BE. A model is stored under
+    the sha256 of its bytes and each sidecar under the sha256 of its url, so
+    several sidecars legitimately name one file — that is what adoption and
+    deduplication both produce. Before the content rename ran on every
+    completion path (2026-09-17) large models kept url-derived names, so one
+    url meant one file and deleting by name was accidentally safe. It is not
+    any more.
+
+    This used to be two sweeps and both were wrong once the file became shared:
+
+    1. `if url_hash in f: delete` — a substring match over `os.walk`, with no
+       check of who else points at the file. A legacy `<base>_<url hash><ext>`
+       that other urls have since ADOPTED was deleted out from under them.
+    2. the referrer-aware sweep, which only ran for sidecars it could still
+       find — and sweep 1 had already deleted `<url hash>.json`. For a plain
+       Hugging Face url, where the effective url is the base url, that is every
+       time: the sidecar went, sweep 2 then matched nothing, and the
+       content-named file was LEAKED on disk forever.
+
+    So it is one pass now. Work out which sidecars this url owns, read the
+    files they name BEFORE deleting anything, and delete a file only when no
+    SURVIVING sidecar still names it.
+    """
     log_path = Path(dir) / "expunge_log.txt"
     error_path = Path(dir) / "error.txt"
     # Compute hash early and log only the hash to avoid leaking sensitive query params
@@ -1052,89 +1129,73 @@ def delete_files(url, dir):
     with open(log_path, "a") as log:
         log.write(f"delete request received, url_hash={url_hash}\n")
 
-    # Pass 1: delete by hash of the provided URL (works if caller sends effective URL)
     deleted_dirs = set()
-    for root, _, files in os.walk(dir):
-        for f in files:
-            with open(log_path, "a") as log:
-                log.write(f"Examining file: {f} in {root}\n")
-            if url_hash in f:
-                file_path = os.path.join(root, f)
-                with open(log_path, "a") as log:
-                    log.write(f"Matched hash, deleting file: {file_path}\n")
-                try:
-                    delete_file_and_cleanup_dir(Path(file_path), dir)
-                    with open(log_path, "a") as log:
-                        log.write(f"Deleted file and checked parent dir: {file_path}\n")
-                except Exception as e:
-                    with open(error_path, "a") as err:
-                        err.write(f"Failed to delete file: {file_path} - {e}\n")
-                deleted_dirs.add(os.path.dirname(file_path))
 
-    # Pass 2: delete by matching JSON sidecars whose base URL is a prefix of the provided URL (or equal)
+    def remove(path, what):
+        try:
+            delete_file_and_cleanup_dir(Path(path), dir)
+            with open(log_path, "a") as log:
+                log.write(f"Deleted {what}: {path}\n")
+        except Exception as e:
+            with open(error_path, "a") as err:
+                err.write(f"Failed to delete {what}: {path} - {e}\n")
+        deleted_dirs.add(os.path.dirname(path))
+
     for root, _, files in os.walk(dir):
-        for f in files:
-            if not f.endswith('.json'):
+        sidecars = [f for f in files if f.endswith(".json")]
+
+        # Which sidecars does this url own? By name, which is the effective
+        # url's hash, or by the base url they stored.
+        doomed = {}
+        for f in sidecars:
+            data = read_sidecar(os.path.join(root, f))
+            if f == f"{url_hash}.json" or (data and sidecar_url_matches(data.get("url"), url)):
+                doomed[f] = data or {}
+
+        # Everything a SURVIVING sidecar names is off limits, whatever else
+        # says otherwise. Read before deleting: a name collected after the fact
+        # is a name read out of a file that is already gone.
+        spoken_for = set()
+        for f in sidecars:
+            if f in doomed:
                 continue
-            json_path = os.path.join(root, f)
-            try:
-                with open(json_path, 'r') as contents:
-                    data = json.load(contents)
-                if isinstance(data, dict):
-                    base_url = data.get("url")
-                else:
-                    base_url = None
-                if isinstance(base_url, str) and (url == base_url or url.startswith(base_url + "?") or url.startswith(base_url + "&")):
-                    # Delete the associated model file and the json itself
-                    model_file = data.get("file_name")
-                    if model_file:
-                        file_path = os.path.join(root, model_file)
-                        if os.path.exists(file_path):
-                            # REFERENCE-AWARE DELETION
-                            # Check if any OTHER sidecar references this file
-                            referenced = False
-                            for other_f in os.listdir(root):
-                                if other_f.endswith('.json') and other_f != f:
-                                    try:
-                                        with open(os.path.join(root, other_f), 'r') as other_contents:
-                                            other_data = json.load(other_contents)
-                                        if other_data.get("file_name") == model_file:
-                                            referenced = True
-                                            break
-                                    except:
-                                        pass
-                            
-                            if not referenced:
-                                try:
-                                    delete_file_and_cleanup_dir(Path(file_path), dir)
-                                    with open(log_path, "a") as log:
-                                        log.write(f"Deleted model file: {file_path}\n")
-                                except Exception as e:
-                                    with open(error_path, "a") as err:
-                                        err.write(f"Failed to delete model file: {file_path} - {e}\n")
-                            else:
-                                with open(log_path, "a") as log:
-                                    log.write(f"Skipping model file deletion (still referenced): {file_path}\n")
-                            
-                            deleted_dirs.add(os.path.dirname(file_path))
-                    # Delete the json sidecar
-                    try:
-                        delete_file_and_cleanup_dir(Path(json_path), dir)
-                        with open(log_path, "a") as log:
-                            log.write(f"Deleted sidecar JSON: {json_path}\n")
-                    except Exception as e:
-                        with open(error_path, "a") as err:
-                            err.write(f"Failed to delete sidecar JSON: {json_path} - {e}\n")
-                        deleted_dirs.add(os.path.dirname(json_path))
-            except Exception as e:
-                with open(error_path, "a") as err:
-                    err.write(f"Failed to read/parse JSON: {json_path} - {e}\n")
+            data = read_sidecar(os.path.join(root, f))
+            if data and data.get("file_name"):
+                spoken_for.add(data["file_name"])
+
+        def is_doomed(filename, _data):
+            return filename in doomed
+
+        for f, data in doomed.items():
+            model_file = data.get("file_name")
+            if model_file and model_file_is_spoken_for(root, model_file, is_doomed):
+                with open(log_path, "a") as log:
+                    log.write(f"Keeping model file, another url still names it: {model_file}\n")
+            elif model_file:
+                model_path = os.path.join(root, model_file)
+                if os.path.exists(model_path):
+                    remove(model_path, "model file")
+                part = part_path_for(model_path)
+                if os.path.exists(part):
+                    remove(part, "partial download")
+            remove(os.path.join(root, f), "sidecar JSON")
+
+        # An orphan sweep for what this url left behind before sidecars
+        # recorded content hashes: files still wearing the url hash in their
+        # name, with no sidecar of their own. Referrer-checked like everything
+        # else, because those are exactly the files adoption reuses.
+        for f in files:
+            if f.endswith(".json") or f in doomed or f in spoken_for:
+                continue
+            if url_hash not in f:
+                continue
+            orphan = os.path.join(root, f)
+            if os.path.exists(orphan):
+                remove(orphan, "file named by this url")
 
     # After all deletions, check and remove empty parent directories
     for d in deleted_dirs:
         parent = Path(d)
-        with open(log_path, "a") as log:
-            log.write(f"Checking if parent directory is empty: {parent}\n")
         if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
             try:
                 parent.rmdir()
@@ -1143,9 +1204,6 @@ def delete_files(url, dir):
             except Exception as e:
                 with open(error_path, "a") as err:
                     err.write(f"fetch.py: Failed to remove output directory: {parent} - {e}\n")
-        else:
-            with open(log_path, "a") as log:
-                log.write(f"Parent directory not empty after deletion: {parent}\n")
 
 
 def part_path_for(file_path: str) -> str:

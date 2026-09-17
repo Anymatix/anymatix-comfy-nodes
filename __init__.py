@@ -45,6 +45,8 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixSeedVR2LoadDiTModel,
     AnymatixSeedVR2LoadVAEModel,
 )
+# The referrer rule both deletion paths obey, defined once in fetch.py.
+from .fetch import model_file_is_spoken_for, sidecar_url_matches
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
@@ -1203,19 +1205,25 @@ async def serve_delete(request):
                         log_lines.append(msg)
                         continue
                     if os.path.isfile(abs_candidate):
-                        # Check if another sidecar still references this model file
-                        referenced = False
-                        for other in filenames:
-                            if other.endswith(".json") and other != fname:
-                                try:
-                                    with open(os.path.join(dirpath, other), "r") as of:
-                                        other_data = json.load(of)
-                                    if isinstance(other_data, dict) and other_data.get("file_name") == model_file:
-                                        referenced = True
-                                        break
-                                except Exception:
-                                    pass
-                        if referenced:
+                        # IS ANY SIDECAR THAT SURVIVES THIS REQUEST STILL NAMING
+                        # THIS FILE? A model is stored under the sha256 of its
+                        # bytes and a sidecar under the sha256 of its url, so
+                        # several sidecars legitimately name one file.
+                        #
+                        # "Another sidecar" is not the question, though: two
+                        # sidecars can store the SAME base url and differ only
+                        # in the auth tail their names were hashed from, and
+                        # both match this request. Each then saw the other as a
+                        # referrer, neither released the file, and both sidecars
+                        # were deleted anyway - leaving the bytes on disk with
+                        # nothing left pointing at them. So a sidecar that is
+                        # itself being deleted does not get a vote.
+                        def _doomed_too(other_name, other_data, _this=fname):
+                            return other_name == _this or sidecar_url_matches(
+                                other_data.get("url"), url
+                            )
+
+                        if model_file_is_spoken_for(dirpath, model_file, _doomed_too):
                             log_lines.append(f"model shared, sidecar-only: {fname}")
                         else:
                             model_path = abs_candidate
@@ -1238,7 +1246,12 @@ async def serve_delete(request):
     deleted_models = []
     for sidecar_path, model_path in targets:
         try:
-            if model_path:
+            # Two doomed sidecars may name ONE file, now that neither of them
+            # counts as the other's referrer. The first removal is the real
+            # one; a file already gone is the job done, not a failure -- and
+            # treating it as one would leave the second sidecar behind,
+            # pointing at nothing.
+            if model_path and os.path.exists(model_path):
                 os.remove(model_path)
                 deleted_models.append(os.path.basename(model_path))
                 print(f"[delete_resource] deleted model: {model_path}")

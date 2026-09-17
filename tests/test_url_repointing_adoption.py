@@ -425,3 +425,307 @@ def test_a_url_serving_different_bytes_is_not_adopted(monkeypatch):
             assert f.read() == payload_v2
         # And revision one is still there, still reachable by its own url.
         assert os.path.isfile(os.path.join(d, old_name))
+
+
+# --------------------------------------------------------------------------
+# Deletion, now that one file has several referrers
+#
+# Storing a model under the sha256 of its bytes and its sidecar under the
+# sha256 of its url means several sidecars legitimately name one file. That is
+# what adoption produces, and it used to be rare for large models only because
+# the parallel path left them url-named. Deleting one url must not take the
+# bytes another url is still using -- and must not leave them behind either.
+
+
+def _store(d, url, file_name, payload, sha=None):
+    """One url's sidecar, as download_file leaves it."""
+    path = os.path.join(d, file_name)
+    if not os.path.exists(path):
+        _write(path, payload)
+    sidecar = {"url": url, "file_name": file_name, "file_size": len(payload)}
+    if sha:
+        sidecar["sha256"] = sha
+    with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
+        json.dump(sidecar, f)
+    return path
+
+
+def test_deleting_one_url_leaves_the_file_the_other_adopted():
+    # THE CASE THAT MATTERS. Two urls adopted onto one file; delete one and the
+    # other must still load.
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"shared weights" * 400
+        sha = hashlib.sha256(payload).hexdigest()
+        name = "model_%s.safetensors" % sha
+        url_a = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+        url_b = "https://huggingface.co/x/y/resolve/bbbb/model.safetensors"
+        _store(d, url_a, name, payload, sha)
+        _store(d, url_b, name, payload, sha)
+
+        delete_files(url_a, d)
+
+        assert os.path.isfile(os.path.join(d, name)), "the bytes url_b still needs were deleted"
+        assert not os.path.exists(os.path.join(d, "%s.json" % hash_string(url_a)))
+        sidecar_b = os.path.join(d, "%s.json" % hash_string(url_b))
+        assert os.path.isfile(sidecar_b)
+        with open(sidecar_b) as f:
+            assert json.load(f)["file_name"] == name
+
+
+def test_deleting_the_last_url_takes_the_file_with_it():
+    # The other half: no leak. Sweep 1 used to eat the sidecar before the
+    # referrer-aware sweep could see it, so a content-named file survived every
+    # deletion and sat on disk forever.
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"sole weights" * 400
+        sha = hashlib.sha256(payload).hexdigest()
+        name = "model_%s.safetensors" % sha
+        url = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+        _store(d, url, name, payload, sha)
+
+        delete_files(url, d)
+
+        assert not os.path.exists(os.path.join(d, name))
+        assert not os.path.exists(os.path.join(d, "%s.json" % hash_string(url)))
+
+
+def test_deleting_the_second_url_then_takes_the_file():
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"shared then sole" * 200
+        sha = hashlib.sha256(payload).hexdigest()
+        name = "model_%s.safetensors" % sha
+        url_a = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+        url_b = "https://huggingface.co/x/y/resolve/bbbb/model.safetensors"
+        _store(d, url_a, name, payload, sha)
+        _store(d, url_b, name, payload, sha)
+
+        delete_files(url_a, d)
+        assert os.path.isfile(os.path.join(d, name))
+        delete_files(url_b, d)
+        assert not os.path.exists(os.path.join(d, name))
+        assert [x for x in os.listdir(d) if x.endswith(".safetensors")] == []
+
+
+def test_a_legacy_url_named_file_another_url_adopted_is_not_deleted():
+    # The sweep that matched `url_hash in filename` had no referrer check at
+    # all. A file still wearing an OLD url hash is exactly what adoption reuses,
+    # so deleting the url it was named after took a file in active use.
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"legacy weights" * 400
+        sha = hashlib.sha256(payload).hexdigest()
+        url_a = "https://huggingface.co/x/y/resolve/main/model.safetensors"
+        url_b = "https://huggingface.co/x/y/resolve/bbbb/model.safetensors"
+        legacy = "model_%s.safetensors" % hash_string(url_a)
+        _store(d, url_a, legacy, payload)          # old sidecar, no sha256
+        _store(d, url_b, legacy, payload, sha)     # adopted it
+
+        delete_files(url_a, d)
+
+        assert os.path.isfile(os.path.join(d, legacy)), "adopted legacy file was deleted"
+        assert os.path.isfile(os.path.join(d, "%s.json" % hash_string(url_b)))
+
+
+def test_an_orphan_named_by_this_url_is_still_swept():
+    # Keeping what the name sweep was FOR: a file wearing this url's hash that
+    # no sidecar names is this url's litter and goes.
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"litter" * 100
+        url = "https://huggingface.co/x/y/resolve/main/model.safetensors"
+        orphan = "model_%s.safetensors" % hash_string(url)
+        _write(os.path.join(d, orphan), payload)
+
+        delete_files(url, d)
+        assert not os.path.exists(os.path.join(d, orphan))
+
+
+def test_a_partial_download_goes_with_its_url():
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"complete" * 100
+        sha = hashlib.sha256(payload).hexdigest()
+        name = "model_%s.safetensors" % sha
+        url = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+        _store(d, url, name, payload, sha)
+        _write(os.path.join(d, name + ".part"), b"half")
+
+        delete_files(url, d)
+        assert not os.path.exists(os.path.join(d, name + ".part"))
+
+
+def test_another_models_file_is_never_touched():
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        mine = b"mine" * 400
+        theirs = b"theirs" * 400
+        url_a = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+        url_b = "https://huggingface.co/x/z/resolve/aaaa/other.safetensors"
+        _store(d, url_a, "model_%s.safetensors" % hashlib.sha256(mine).hexdigest(), mine)
+        other = _store(d, url_b, "other_%s.safetensors" % hashlib.sha256(theirs).hexdigest(), theirs)
+
+        delete_files(url_a, d)
+        assert os.path.isfile(other)
+        assert os.path.isfile(os.path.join(d, "%s.json" % hash_string(url_b)))
+
+
+def test_a_credentialled_url_deletes_the_sidecar_that_stored_its_base():
+    # download_file stores the BASE url and names the sidecar after the
+    # EFFECTIVE one, so neither identifies the other on its own.
+    from fetch import delete_files
+
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"civitai weights" * 200
+        sha = hashlib.sha256(payload).hexdigest()
+        name = "model_%s.safetensors" % sha
+        base = "https://civitai.com/api/download/models/12345"
+        effective = base + "?token=SECRET"
+        _write(os.path.join(d, name), payload)
+        with open(os.path.join(d, "%s.json" % hash_string(effective)), "w") as f:
+            json.dump({"url": base, "file_name": name, "file_size": len(payload), "sha256": sha}, f)
+
+        delete_files(effective, d)
+        assert not os.path.exists(os.path.join(d, name))
+        assert not os.path.exists(os.path.join(d, "%s.json" % hash_string(effective)))
+
+
+def test_a_sidecar_pointing_at_a_gone_file_re_fetches_rather_than_lying(monkeypatch):
+    # THE REVERSE HAZARD, and it is benign by design. A sidecar whose file has
+    # been removed does not report the model present: download_file's size
+    # check fails, adoption looks for the bytes elsewhere, and failing that it
+    # downloads. It can never serve a different model, because adoption proves
+    # the content hash before adopting.
+    payload = b"re-fetched" * 400
+    sha = hashlib.sha256(payload).hexdigest()
+    url = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+
+    monkeypatch.setattr(fetch, "requests", _FakeRequests(payload))
+    monkeypatch.setattr(fetch, "REQUESTS_AVAILABLE", True)
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
+            json.dump({"url": url, "file_name": "model_%s.safetensors" % sha,
+                       "file_size": len(payload), "sha256": sha}, f)
+
+        _FakeSession.bytes_served = 0
+        got = download_file(url=url, dir=d)
+
+        assert _FakeSession.bytes_served == len(payload)
+        assert os.path.basename(got) == "model_%s.safetensors" % sha
+        with open(got, "rb") as f:
+            assert f.read() == payload
+
+
+def test_a_sidecar_whose_file_moved_adopts_instead_of_downloading(monkeypatch):
+    # Same situation, but the bytes are still on the machine under another
+    # name: it adopts them rather than paying for them twice.
+    payload = b"moved not gone" * 300
+    sha = hashlib.sha256(payload).hexdigest()
+    url = "https://huggingface.co/x/y/resolve/aaaa/model.safetensors"
+
+    monkeypatch.setattr(fetch, "requests", _FakeRequests(payload))
+    monkeypatch.setattr(fetch, "REQUESTS_AVAILABLE", True)
+
+    with tempfile.TemporaryDirectory() as d:
+        _write(os.path.join(d, "model_%s.safetensors" % sha), payload)
+        with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
+            json.dump({"url": url, "file_name": "model_under_an_old_name.safetensors",
+                       "file_size": len(payload), "sha256": sha}, f)
+
+        _FakeSession.bytes_served = 0
+        got = download_file(url=url, dir=d)
+
+        assert _FakeSession.bytes_served == 0
+        assert os.path.basename(got) == "model_%s.safetensors" % sha
+
+
+# --------------------------------------------------------------------------
+# The referrer rule itself
+#
+# serve_delete in __init__.py is the deletion path the APP actually calls
+# (ComfyMachineInfo.ts posts to /anymatix/delete_resource); delete_files has no
+# caller in the pack. __init__.py cannot be imported outside ComfyUI, so the
+# rule it obeys lives in fetch.py and is exercised here directly -- the same
+# function object the route calls, not a copy of its logic.
+
+
+def test_a_surviving_sidecar_holds_the_file():
+    from fetch import model_file_is_spoken_for
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "aaaa.json"), "w") as f:
+            json.dump({"url": "u1", "file_name": "shared.safetensors"}, f)
+        with open(os.path.join(d, "bbbb.json"), "w") as f:
+            json.dump({"url": "u2", "file_name": "shared.safetensors"}, f)
+
+        assert model_file_is_spoken_for(d, "shared.safetensors", lambda n, _d: n == "aaaa.json")
+
+
+def test_the_last_sidecar_releases_the_file():
+    from fetch import model_file_is_spoken_for
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "aaaa.json"), "w") as f:
+            json.dump({"url": "u1", "file_name": "sole.safetensors"}, f)
+
+        assert not model_file_is_spoken_for(d, "sole.safetensors", lambda n, _d: n == "aaaa.json")
+
+
+def test_two_sidecars_dying_together_do_not_hold_each_other_up():
+    # THE STANDOFF. Two sidecars storing the same base url, differing only in
+    # the auth tail their names were hashed from, both matched by one delete.
+    # Each used to count the other as a referrer, so the bytes were kept and
+    # both sidecars removed -- a file with nothing left pointing at it.
+    from fetch import model_file_is_spoken_for, sidecar_url_matches
+
+    base = "https://civitai.com/api/download/models/12345"
+    with tempfile.TemporaryDirectory() as d:
+        for tail in ("OLDKEY", "NEWKEY"):
+            with open(os.path.join(d, "%s.json" % hash_string(base + "?token=" + tail)), "w") as f:
+                json.dump({"url": base, "file_name": "shared.safetensors"}, f)
+
+        url = base + "?token=NEWKEY"
+        doomed = lambda _n, data: sidecar_url_matches(data.get("url"), url)
+        assert not model_file_is_spoken_for(d, "shared.safetensors", doomed)
+
+
+def test_a_different_model_does_not_hold_the_file():
+    from fetch import model_file_is_spoken_for
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "aaaa.json"), "w") as f:
+            json.dump({"url": "u1", "file_name": "mine.safetensors"}, f)
+        with open(os.path.join(d, "bbbb.json"), "w") as f:
+            json.dump({"url": "u2", "file_name": "theirs.safetensors"}, f)
+
+        assert not model_file_is_spoken_for(d, "mine.safetensors", lambda n, _d: n == "aaaa.json")
+
+
+def test_an_unreadable_directory_refuses_to_release_the_file():
+    # It cannot prove the file is free, so it does not claim it is. Refusing to
+    # delete leaves a reclaimable file; deleting on a failed read does not.
+    from fetch import model_file_is_spoken_for
+
+    assert model_file_is_spoken_for("/nonexistent-dir-for-this-test", "x.safetensors", lambda *_: False)
+
+
+def test_a_malformed_sidecar_is_not_a_referrer():
+    from fetch import model_file_is_spoken_for
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "broken.json"), "w") as f:
+            f.write("{not json")
+        with open(os.path.join(d, "aaaa.json"), "w") as f:
+            json.dump({"url": "u1", "file_name": "sole.safetensors"}, f)
+
+        assert not model_file_is_spoken_for(d, "sole.safetensors", lambda n, _d: n == "aaaa.json")
