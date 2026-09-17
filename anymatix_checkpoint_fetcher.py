@@ -449,6 +449,44 @@ def _sidecars_for_model(dir_path: str, model_basename: str) -> list:
     return out
 
 
+FETCH_PHASES = ("fetching", "verifying", "adopting")
+
+
+def _send_fetch_phase(phase: str, value: int, maximum: int) -> None:
+    """Tell the app WHAT the bar is measuring, in the same message as the number.
+
+    ComfyUI's `progress` message carries value, max and node, and has no room
+    for a phase; patching ComfyUI is forbidden, so this goes beside it and
+    carries the same two numbers plus the word for what they count. One
+    message, so the label and the number can never come from different phases -
+    which is the defect: Vincenzo watched FETCH CHECKPOINT at 0% with an empty
+    bar and had to ask what the machine was doing, twice in one day, while it
+    was verifying a file it already had.
+    bugs/fetch-model-sits-0-while-fetcher-hashing
+
+    Outside ComfyUI there is nobody to tell, and that is a normal state for the
+    fetcher's own tests rather than an error - so the two ways it can be absent
+    are checked for by name instead of being swallowed by a bare except.
+    """
+    try:
+        from server import PromptServer
+    except ImportError:
+        return
+    instance = getattr(PromptServer, "instance", None)
+    if instance is None:
+        return
+    context = get_executing_context()
+    node_id = getattr(context, "node_id", None) if context else None
+    if node_id is None:
+        return
+    instance.send_sync("anymatix.fetch_phase", {
+        "node": str(node_id),
+        "phase": phase,
+        "value": int(value),
+        "max": int(maximum),
+    })
+
+
 def _mirror_cache_entry_to_volume(cache_dir: str, durable_dir: str, model_basename: str) -> None:
     """Model first, sidecars last: the sidecar arriving on the volume is what
     declares the download durable. The cache sidecar goes away afterwards so
@@ -1377,6 +1415,7 @@ class AnymatixFetcher:
             dir = get_anymatix_models_dir(dirmap[url["type"]])
             pbar = comfy.utils.ProgressBar(1000)
             progress = 0
+            phase_name = "fetching"
             pbar.update_absolute(progress, 1000)
 
             base_url = url.get("url")
@@ -1465,6 +1504,22 @@ class AnymatixFetcher:
                             except Exception:
                                 pass
 
+            def set_phase(name):
+                """A NEW PHASE IS A NEW BAR, and it starts where a bar starts.
+
+                Carrying the fetch's percentage into the verification would say
+                the hash was 80% done before it had read a byte. The exception
+                is `adopting`, which is not a wait at all: the proof has passed
+                and the file is ours, so it is announced full rather than empty
+                - an empty bar under MODEL ALREADY HERE would be the same lie
+                in the other direction.
+                """
+                nonlocal phase_name, progress
+                phase_name = name
+                progress = 1000 if name == "adopting" else 0
+                pbar.update_absolute(progress, 1000)
+                _send_fetch_phase(name, progress, 1000)
+
             def callback(x, y):
                 if y is None or y <= 0:
                     return
@@ -1474,6 +1529,7 @@ class AnymatixFetcher:
                 if new_progress != progress:
                     progress = new_progress
                     pbar.update_absolute(progress, 1000)
+                    _send_fetch_phase(phase_name, progress, 1000)
 
             try:
                 # NVMe-first: bytes land on local disk and the run starts from
@@ -1499,6 +1555,7 @@ class AnymatixFetcher:
                         # repointed at a new revision adopts nothing and pays
                         # for the whole download again, by the minute.
                         adopt_dirs=[dir] if cache_dir else None,
+                        phase=set_phase,
                     )
                 except Exception:
                     if not cache_dir:
@@ -1514,6 +1571,7 @@ class AnymatixFetcher:
                         expand_info=expand_info,
                         effective_url=effective,
                         redact_append=auth,
+                        phase=set_phase,
                     )
                 # ONLY MIRROR WHAT IS ACTUALLY ON THE CACHE DISK. `download_file`
                 # may adopt a file out of `adopt_dirs` and hand back a path on

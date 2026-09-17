@@ -92,12 +92,55 @@ def is_valid_json_file(file_path: str) -> bool:
         return False
 
 
-def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
-    """Compute SHA256 hash of a file efficiently."""
+# How many times a hash reports its position, at most, over the whole file.
+#
+# 200 is 0.5% a step, and it is ComfyUI's own floor rather than a taste: its
+# ProgressBar drops any update that moved less than 0.5% or arrived within
+# 100 ms of the last one, so a finer step buys nothing that reaches the screen
+# and a coarser one leaves the bar standing still. At the measured 530 MB/s it
+# puts an update roughly every 0.115 s on a 12 GB weight — 200 of them across
+# the 23 s — and a 469 MB file still gets 200 steps rather than one per
+# gigabyte, which is the failure this number exists to avoid.
+HASH_PROGRESS_STEPS = 200
+
+
+def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024,
+                        progress: Optional[Callable[[int, Optional[int]], None]] = None) -> str:
+    """Compute SHA256 hash of a file efficiently, saying how far it has got.
+
+    `progress(bytes_hashed, total_bytes)` is the SAME SHAPE a download already
+    reports, on purpose: a hash reads the file sequentially and knows its size,
+    so the bar it drives needs no new mechanism and no new widget. It was
+    always available and simply never asked for — which is why Vincenzo watched
+    FETCH CHECKPOINT sit at 0% with an empty bar for 23 s while the machine was
+    doing real, correct work. bugs/fetch-model-sits-0-while-fetcher-hashing
+
+    The caller is told the start and the end as well as the middle, so a bar
+    that is driven by this always begins at 0 and always arrives at 100 rather
+    than stopping wherever the last step happened to fall.
+    """
+    try:
+        total = os.path.getsize(file_path)
+    except OSError:
+        total = 0
+    step = max(chunk_size, total // HASH_PROGRESS_STEPS) if total else chunk_size
     sha256_hash = hashlib.sha256()
+    done = 0
+    next_report = step
+    if progress:
+        progress(0, total)
     with open(file_path, "rb") as f:
         for byte_block in iter(lambda: f.read(chunk_size), b""):
             sha256_hash.update(byte_block)
+            done += len(byte_block)
+            if progress and done >= next_report:
+                progress(done, total)
+                next_report = done + step
+    if progress:
+        # The file is the length it turned out to be, not the length it was
+        # when we stat-ed it: a bar must not finish at 99% because somebody
+        # appended a byte, nor at 140% because they truncated it.
+        progress(done, max(total, done))
     return sha256_hash.hexdigest()
 
 
@@ -255,7 +298,8 @@ def adoption_candidates(dirs, canonical_name: str, sha256: str, self_sidecar: st
 
 
 def adopt_existing_file(dirs, canonical_name: str, sha256: str, expected_size,
-                        self_sidecar: str, label: str) -> Optional[str]:
+                        self_sidecar: str, label: str,
+                        progress: Optional[Callable[[int, Optional[int]], None]] = None) -> Optional[str]:
     """A file the machine already has, PROVEN to be the bytes we were about to
     download — or None, which means download.
 
@@ -290,7 +334,7 @@ def adopt_existing_file(dirs, canonical_name: str, sha256: str, expected_size,
         try:
             print(f"[ANYMATIX ADOPT] hashing {name} to check it holds content sha256 "
                   f"{sha256}, which is what url hash {url_hash} asks for (recorded as {label})")
-            actual = compute_file_sha256(path).lower()
+            actual = compute_file_sha256(path, progress=progress).lower()
             if actual != sha256:
                 print(f"[ANYMATIX ADOPT] {name} holds content sha256 {actual}, not the "
                       f"{sha256} url hash {url_hash} asks for - refusing to adopt it")
@@ -1392,7 +1436,8 @@ def part_completion_is_recorded(part_path: str, expected_size) -> bool:
 
 
 def resumed_part_is_the_whole_file(part_file: str, expected_size, remote_sha256,
-                                   label: str) -> bool:
+                                   label: str,
+                                   progress: Optional[Callable[[int, Optional[int]], None]] = None) -> bool:
     """Whether a full-size `.part` found on disk really holds the file.
 
     The question this replaces was `os.path.getsize(part) == file_size`, which
@@ -1415,7 +1460,7 @@ def resumed_part_is_the_whole_file(part_file: str, expected_size, remote_sha256,
     """
     if remote_sha256:
         try:
-            actual = compute_file_sha256(part_file).lower()
+            actual = compute_file_sha256(part_file, progress=progress).lower()
         except OSError as e:
             print(f"[ANYMATIX DOWNLOAD] Could not hash the resumed part file for {label}: {e}")
             return False
@@ -1459,7 +1504,7 @@ def finalize_download(part: str, file_path: str, expected_size, label: str) -> s
     return file_path
 
 
-def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None):
+def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None):
     """Return the path of the model for `url`, fetching it only if the machine
     has not got it.
 
@@ -1471,7 +1516,42 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
     """
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library is required for downloading")
-        
+
+    # WHAT THE WAIT IS, SAID BEFORE THE FIRST BYTE OF IT IS REPORTED.
+    #
+    # This function does three things a person can sit through, and until now
+    # the screen had one word for all of them. Vincenzo watched FETCH CHECKPOINT
+    # at 0% with an empty bar and had to ask what the machine was doing, twice
+    # in one day; the answer both times was that it was hashing a file it
+    # already had, which is the 2026-09-17 adoption work doing its job.
+    #
+    #   fetching   bytes are coming over the network
+    #   verifying  a file already on disk is being hashed to prove it is the
+    #              bytes this url serves - the adoption candidate, a resumed
+    #              part file, or what a download just wrote
+    #   adopting   the proof passed and the file is taken over; no bytes, no wait
+    #
+    # `phase` is announced BEFORE the progress it describes, never after, so a
+    # bar cannot be driven under the label of the thing that finished before it.
+    def in_phase(name: str) -> None:
+        if phase:
+            phase(name)
+
+    def verifying(done, total):
+        """A hash reports on the same channel a download does — and announces
+        its phase from its own FIRST tick, not in advance.
+
+        Announcing before the call put VERIFYING on screen for an adoption that
+        found no candidate and hashed nothing: a label for work that did not
+        happen, which is the same defect as a label for work misnamed. Every
+        hash opens with `(0, total)`, so the first tick IS the start of real
+        work and there is no other way to reach this.
+        """
+        if done == 0:
+            in_phase("verifying")
+        if callback:
+            callback(done, total)
+
     effective = effective_url or url
     print("download file", redact_url(effective, redact_append), dir)
     url_hash = hash_string(effective)
@@ -1633,7 +1713,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
             # POST-DOWNLOAD DEDUPLICATION
             print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
-            sha256 = compute_file_sha256(file_path).lower()
+            sha256 = compute_file_sha256(file_path, progress=verifying).lower()
 
             # A SIDECAR MUST NEVER STATE A HASH THE SERVER DID NOT.
             #
@@ -1707,7 +1787,8 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     # Every large model takes the parallel path.
                     # bugs/a-parallel-download-pre-allocates-part-file-so
                     if resumed_part_is_the_whole_file(
-                        part_file, data["file_size"], remote_stated_sha256, data["file_name"]
+                        part_file, data["file_size"], remote_stated_sha256,
+                        data["file_name"], progress=verifying
                     ):
                         finalize_download(
                             part_file, file_path, data["file_size"], data["file_name"]
@@ -1772,8 +1853,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 data.get("file_size"),
                 f"{url_hash}.json",
                 data["file_name"],
+                progress=verifying,
             )
             if adopted:
+                in_phase("adopting")
                 # The adopted file KEEPS ITS NAME. Renaming it to the canonical
                 # content name would heal the store, but other sidecars may
                 # already point at the old name and would be orphaned by it.
@@ -1798,6 +1881,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 return adopted
 
         downloaded_size = local_file_size
+        in_phase("fetching")
 
         # PARALLEL DOWNLOAD ATTEMPT — fresh downloads only
         parallel_success = False
