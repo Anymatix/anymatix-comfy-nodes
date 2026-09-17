@@ -101,6 +101,192 @@ def compute_file_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
     return sha256_hash.hexdigest()
 
 
+CONTENT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# How many candidate files an adoption may hash before giving up and downloading.
+# Adoption picks candidates by content hash, so one is the normal number; the
+# bound exists so a store full of same-named files cannot turn a fetch into a
+# linear scan of the disk.
+MAX_ADOPTION_CANDIDATES = 4
+
+
+def canonical_model_name(file_name: str, sha256: str) -> str:
+    """The name a finished download wears: `<original base>_<content sha256><ext>`.
+
+    `file_name` is the provisional `<base>_<url hash><ext>` built by
+    `download_file`, or a bare `<base><ext>`. The url hash suffix is dropped,
+    because the FILE is named by its bytes and only the sidecar is named by the
+    url. Two urls serving the same bytes therefore land on one filename, which
+    is what makes adoption possible at all.
+
+    Factored out of the post-download deduplication block so the pre-download
+    adoption check and the post-download rename cannot disagree about the name.
+    """
+    parts = file_name.rsplit("_", 1)
+    if len(parts) > 1:
+        basename = parts[0]
+        suffix = parts[1]
+        ext_parts = suffix.split(".", 1)
+        ext = ("." + ext_parts[1]) if len(ext_parts) > 1 else ""
+    else:
+        basename_parts = file_name.rsplit(".", 1)
+        basename = basename_parts[0]
+        ext = ("." + basename_parts[1]) if len(basename_parts) > 1 else ""
+    return f"{basename}_{sha256}{ext}"
+
+
+def content_sha256_from_headers(headers) -> Optional[str]:
+    """The file's own sha256, if the server stated it.
+
+    ONLY `X-Linked-Etag` is read, and the distinction is load-bearing. Measured
+    against Hugging Face on 2026-09-17 for
+    `Comfy-Org/Krea-2 .../loras/krea2_darkbrush.safetensors`:
+
+        X-Linked-Etag: "f47c4316...cd5db7c6"   (on the 302 from huggingface.co)
+        ETag:          "fdead7c2...2860d1a"    (on the CDN response it redirects to)
+
+    Both are 64 hex characters. Only the first is the sha256 of the bytes —
+    downloading the file and hashing it returned `f47c4316...cd5db7c6` exactly.
+    The second is the Xet content-addressing hash, a different function of the
+    same file. Accepting "any 64-hex ETag" would therefore name the file after
+    a hash it does not have, and every later lookup would miss.
+
+    Non-LFS files answer with a 40-hex git blob sha1 in both headers, and S3
+    multipart objects with `<md5>-<n>`; the 64-hex shape rejects both, so the
+    caller simply learns nothing and downloads, which is the correct outcome.
+    """
+    if not headers:
+        return None
+    raw = headers.get("X-Linked-Etag") or headers.get("x-linked-etag")
+    if not raw:
+        return None
+    value = raw.strip()
+    if value.startswith("W/"):
+        value = value[2:]
+    value = value.strip('"').strip().lower()
+    return value if CONTENT_SHA256_RE.match(value) else None
+
+
+def adoption_candidates(dirs, canonical_name: str, sha256: str, self_sidecar: str,
+                        expected_size=None) -> List[str]:
+    """Files that could already hold these bytes — strongest signal first.
+
+    Nothing is hashed here. This only proposes; `adopt_existing_file` disposes.
+    The scoping matters: without it, "do we already have this?" would mean
+    hashing every model in the store on every fetch.
+
+      1. the canonical name itself — one `stat`;
+      2. any file whose name carries this sha256 under a different base name;
+      3. any sidecar in the directory that already recorded this sha256;
+      4. ANY FILE WITH THE SAME ORIGINAL NAME AND THE SAME SIZE, whatever
+         suffix it wears.
+
+    Rule 4 is not a loosening, it is the only rule that fires on a machine that
+    has been running Anymatix. Until 2026-09-17 a parallel download — which is
+    every large model — returned before the content rename, so the store is
+    full of files named `<base>_<URL hash><ext>` whose sidecars carry no
+    `sha256` at all. Rules 1 to 3 all look for a content hash that was never
+    written. Rule 4 finds the file by the only two things that survived, and
+    the caller then proves it by hashing it.
+
+    A size that does not match is dropped here rather than in the caller, so
+    the caller's hashing budget is spent on plausible files only.
+    """
+    seen = set()
+    found: List[str] = []
+
+    def offer(path):
+        if not path or path in seen or not os.path.isfile(path):
+            return
+        try:
+            if expected_size is not None and os.path.getsize(path) != expected_size:
+                return
+        except OSError:
+            # It was there a moment ago and is not now. Proposing it would only
+            # move the failure into the caller's hashing loop.
+            return
+        seen.add(path)
+        found.append(path)
+
+    stem_parts = canonical_name.rsplit(".", 1)
+    ext = ("." + stem_parts[1]) if len(stem_parts) > 1 else ""
+    base = stem_parts[0].rsplit("_", 1)[0]
+
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        offer(os.path.join(d, canonical_name))
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for item in entries:
+            if item.endswith(".json"):
+                continue
+            if item.rsplit(".", 1)[0].rsplit("_", 1)[-1].lower() == sha256:
+                offer(os.path.join(d, item))
+        for item in entries:
+            if not item.endswith(".json") or item == self_sidecar:
+                continue
+            try:
+                with open(os.path.join(d, item), "r") as f:
+                    other = json.load(f)
+            except (OSError, ValueError):
+                # A sidecar we cannot read is a sidecar with nothing to say
+                # about this file. It is not this function's job to repair it.
+                continue
+            if isinstance(other, dict) and str(other.get("sha256", "")).lower() == sha256:
+                name = other.get("file_name")
+                if name:
+                    offer(os.path.join(d, name))
+        # Rule 4 identifies by name and size only, so it is worth nothing
+        # without a size to check against.
+        if expected_size is None:
+            continue
+        for item in entries:
+            if item.endswith(".json") or item.endswith(".part"):
+                continue
+            if ext and not item.endswith(ext):
+                continue
+            item_stem = item[:-len(ext)] if ext else item
+            if item_stem == base or item_stem.rsplit("_", 1)[0] == base:
+                offer(os.path.join(d, item))
+    return found
+
+
+def adopt_existing_file(dirs, canonical_name: str, sha256: str, expected_size,
+                        self_sidecar: str, label: str) -> Optional[str]:
+    """A file the machine already has, PROVEN to be the bytes we were about to
+    download — or None, which means download.
+
+    The proof is a full re-hash, not the filename. A filename asserting a hash
+    is written by this code and is normally true, but a truncated or swapped
+    file wearing a canonical name would otherwise be served silently as a
+    model, and a wrong model is a worse outcome than a redundant download.
+
+    The re-hash is affordable, measured on 2026-09-17 on this machine:
+    sha256 of a 469 MB safetensors took 0.89 s (~530 MB/s), against 22 s to
+    download the same file — so verification costs about 4% of what it saves,
+    and roughly 11 s for a 6 GB checkpoint.
+
+    Anything that does not verify is skipped with a loud line and the caller
+    downloads normally. Adoption never falls back to a file it could not prove.
+    """
+    candidates = adoption_candidates(dirs, canonical_name, sha256, self_sidecar, expected_size)
+    for path in candidates[:MAX_ADOPTION_CANDIDATES]:
+        try:
+            print(f"[ANYMATIX ADOPT] verifying {path} against {sha256} for {label}")
+            actual = compute_file_sha256(path).lower()
+            if actual != sha256:
+                print(f"[ANYMATIX ADOPT] {path} hashes to {actual}, not {sha256} - refusing to adopt it")
+                continue
+            print(f"[ANYMATIX ADOPT] adopting {path} for {label}: no download needed")
+            return path
+        except Exception as e:
+            print(f"[ANYMATIX ADOPT] could not verify {path}: {e}")
+    return None
+
+
 CREDENTIAL_QUERY_KEYS = {"token", "api_key", "apikey", "access_token"}
 
 
@@ -142,10 +328,11 @@ def redact_url(u: str, appended: Optional[str] = None) -> str:
 def fetch_headers(url, session):
     """Fetch headers with error handling for missing requests"""
     if not REQUESTS_AVAILABLE:
-        return {"file_name": None, "file_size": None}
-        
+        return {"file_name": None, "file_size": None, "remote_sha256": None}
+
     file_name = None
     file_size = None
+    remote_sha256 = None
     try:
         # TODO: FIXME: should this be session.head??
         with session.get(url, allow_redirects=True, stream=True) as response:
@@ -157,9 +344,17 @@ def fetch_headers(url, session):
                     file_name = filename_match.group(1)
             if "Content-Length" in response.headers:
                 file_size = int(response.headers.get('Content-Length', 0))
+            # The content hash is announced on the FIRST response, not the last:
+            # Hugging Face puts `X-Linked-Etag` on the 302 that sends us to the
+            # CDN, and the CDN's own response does not carry it. `response`
+            # here is the end of the chain, so the redirects have to be walked.
+            for hop in list(response.history) + [response]:
+                remote_sha256 = content_sha256_from_headers(hop.headers)
+                if remote_sha256:
+                    break
     except Exception:
         pass
-    return {"file_name": file_name, "file_size": file_size}
+    return {"file_name": file_name, "file_size": file_size, "remote_sha256": remote_sha256}
 
 
 def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size: int = 0, chunk_size=8192) -> None:
@@ -994,7 +1189,16 @@ def finalize_download(part: str, file_path: str, expected_size, label: str) -> s
     return file_path
 
 
-def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None):
+def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None):
+    """Return the path of the model for `url`, fetching it only if the machine
+    has not got it.
+
+    `adopt_dirs` are extra directories that may already hold the bytes and are
+    read but never written into — the durable models dir, when `dir` is the
+    NVMe cache. The returned path may be in one of them, so a caller that does
+    something with `dir` afterwards (mirroring a cache entry, say) must check
+    where the file actually came back from.
+    """
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library is required for downloading")
         
@@ -1036,7 +1240,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             with open(store_path, 'w') as file:
                 json.dump(data, file, indent=4)
 
-        # EARLY DEDUPLICATION CHECK (using metadata hash if available)
+        # The content hash Civitai states in the model metadata, if there is one.
         metadata_hash = None
         if "data" in data and isinstance(data["data"], dict):
             # Check for hashes in Civitai-style metadata
@@ -1051,29 +1255,95 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
         file_path = os.path.join(dir, data["file_name"])
 
-        if metadata_hash:
-            data["sha256"] = metadata_hash # Pre-set it
-            print(f"[ANYMATIX] Early hash check for {data['file_name']}: {metadata_hash}")
-            for item in os.listdir(dir):
-                if item.endswith(".json") and item != f"{url_hash}.json":
-                    try:
-                        with open(os.path.join(dir, item), 'r') as f:
-                            other_data = json.load(f)
-                        if other_data.get("sha256") == metadata_hash:
-                            other_file_name = other_data.get("file_name")
-                            if other_file_name:
-                                other_file_path = os.path.join(dir, other_file_name)
-                                if os.path.exists(other_file_path):
-                                    print(f"[ANYMATIX] Found existing model with matching hash: {other_file_path}. Using it.")
-                                    # Update current sidecar to point to the EXISTING file
-                                    data["file_name"] = other_file_name
-                                    with open(store_path, 'w') as file:
-                                        json.dump(data, file, indent=4)
-                                    return other_file_path
-                    except Exception as e:
-                        print(f"[WARNING] Early deduplication check failed for {item}: {e}")
+        # What the bytes should hash to, if anybody told us: Civitai says it in
+        # the model metadata, Hugging Face in `X-Linked-Etag`. Either way it is
+        # the only thing that can identify a file we already have, because the
+        # url cannot: the url is the sidecar's name, not the file's.
+        # `sha256` last: on a warm sidecar it is what a previous run recorded
+        # for THIS url, which is still a correct identity for the file if the
+        # file itself has since been renamed or moved away.
+        target_sha256 = metadata_hash or data.get("remote_sha256") or data.get("sha256")
+        if target_sha256:
+            data["sha256"] = target_sha256  # Pre-set it
+
         local_file_size = 0
         part_file = part_path_for(file_path)
+
+        def finish_download():
+            """EVERY FINISHED DOWNLOAD LEAVES THE SAME THING BEHIND, and until
+            2026-09-17 two of the three did not.
+
+            A file is named by the sha256 of its BYTES; only the sidecar is
+            named by the url. That rename lived at the bottom of this function,
+            and both the parallel path and the resumed-`.part` path
+            `return`ed straight out of `finalize_download` before reaching it —
+            so a model fetched in parallel, which is every large model, stayed
+            on disk under `<base>_<URL hash><ext>` and its sidecar never
+            recorded a `sha256` at all.
+
+            Measured live against Hugging Face on 2026-09-17: fetching
+            `krea2_darkbrush.safetensors` left it named after the url hash
+            `f77bdb3e...`, not its content hash `f47c4316...`.
+
+            That is why repointing a url could not be recovered from: there was
+            no content-named file to find and no hash in the sidecar to find it
+            by. The whole store was keyed on the url twice over.
+            """
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(
+                    f"Download completed but file not found: {file_path}. "
+                    f"This may indicate a download failure, filesystem issue, or the file was deleted during download."
+                )
+
+            if data["file_size"] is not None:
+                actual_size = os.path.getsize(file_path)
+                if actual_size != data["file_size"]:
+                    # Self-heal: remove the bad file so the next run starts clean instead
+                    # of resuming/appending onto it again (the re-download-forever loop).
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    raise Exception(
+                        f"Downloaded file size mismatch for {data['file_name']}: "
+                        f"expected {data['file_size']} bytes, got {actual_size} bytes. "
+                        f"The corrupted file was removed and will be re-downloaded on the next run."
+                    )
+
+            if file_path.lower().endswith(".json") and not is_valid_json_file(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                raise Exception(
+                    f"Downloaded JSON file is malformed for {data['file_name']}. "
+                    f"The corrupted file was removed and will be re-downloaded on the next run."
+                )
+
+            # POST-DOWNLOAD DEDUPLICATION
+            print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
+            sha256 = compute_file_sha256(file_path).lower()
+            data["sha256"] = sha256
+
+            canonical_name = canonical_model_name(data["file_name"], sha256)
+            canonical_path = os.path.join(dir, canonical_name)
+
+            if os.path.exists(canonical_path) and canonical_path != file_path:
+                print(f"[ANYMATIX] Deduplicated model found: {canonical_path}. Reusing.")
+                os.remove(file_path)
+                data["file_name"] = canonical_name
+            else:
+                print(f"[ANYMATIX] New unique model. Naming: {canonical_name}")
+                os.rename(file_path, canonical_path)
+                data["file_name"] = canonical_name
+
+            # Save sidecar with canonical filename and hash
+            with open(store_path, 'w') as file:
+                json.dump(data, file, indent=4)
+
+            print("Model name:", data["file_name"])
+
+            return os.path.join(dir, data["file_name"])
 
         if data["file_size"] is not None:
             # THE FINAL NAME MEANS FINISHED. A file wearing it whose size is not
@@ -1097,9 +1367,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 if local_file_size == data["file_size"]:
                     # It was complete and nobody renamed it — the process died
                     # between the last byte and the rename. Finish the job.
-                    return finalize_download(
+                    finalize_download(
                         part_file, file_path, data["file_size"], data["file_name"]
                     )
+                    return finish_download()
                 if local_file_size > data["file_size"]:
                     # Self-heal: a partial larger than the target is corrupt — almost
                     # always a prior resume where the server ignored our Range header and
@@ -1120,6 +1391,59 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             print(f"[ANYMATIX DOWNLOAD] Removing malformed cached JSON before re-download: {file_path}")
             os.remove(file_path)
 
+        # ADOPTION — the last thing tried before spending bandwidth.
+        #
+        # A cached file is named by the sha256 of its BYTES; its sidecar is
+        # named by the sha256 of the URL. So repointing a url — which is what
+        # `a8f13a50b` did to all 75 shipped Hugging Face urls on 2026-09-16,
+        # moving them from `/resolve/main/` to `/resolve/<commit>/` — changes
+        # the sidecar's name and nothing else. The file was still on disk under
+        # its content name; nothing looked for it there, so every machine
+        # downloaded its whole model set again (measured on fmt-5000,
+        # 2026-09-17: z-image turbo re-fetched from zero).
+        #
+        # The cache key is NOT normalised to drop the revision, and must not
+        # be: two revisions of one repo path may serve different bytes, and a
+        # key that ignored the revision would hand back the wrong model in
+        # silence. What is stable across revisions is the CONTENT hash, and
+        # that is what is matched here — the server states it, and the file on
+        # disk is re-hashed to prove it before anything is adopted.
+        #
+        # This sits after the `.part` and size checks so that a warm run, where
+        # our own file is already present under our own name, returns above
+        # without hashing anything.
+        if target_sha256:
+            adopted = adopt_existing_file(
+                [dir] + list(adopt_dirs or []),
+                canonical_model_name(data["file_name"], target_sha256),
+                target_sha256,
+                data.get("file_size"),
+                f"{url_hash}.json",
+                data["file_name"],
+            )
+            if adopted:
+                # The adopted file KEEPS ITS NAME. Renaming it to the canonical
+                # content name would heal the store, but other sidecars may
+                # already point at the old name and would be orphaned by it.
+                # Recording the hash in our own sidecar is enough: the next
+                # fetch of this url finds the file by name and size and returns
+                # above without hashing anything, so the verification is paid
+                # once per url, not once per run.
+                data["file_name"] = os.path.basename(adopted)
+                # The sidecar lives beside the file it names, or it dies with a
+                # container the file survives — and leaves an orphan behind
+                # pointing at nothing.
+                adopted_store = os.path.join(os.path.dirname(adopted), f"{url_hash}.json")
+                with open(adopted_store, 'w') as file:
+                    json.dump(data, file, indent=4)
+                if os.path.abspath(adopted_store) != os.path.abspath(store_path) \
+                        and os.path.exists(store_path):
+                    os.remove(store_path)
+                # A partial for bytes we now hold is dead weight.
+                if os.path.exists(part_file):
+                    os.remove(part_file)
+                return adopted
+
         downloaded_size = local_file_size
 
         # PARALLEL DOWNLOAD ATTEMPT — fresh downloads only
@@ -1138,9 +1462,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 if parallel_success:
                     mb_total = data["file_size"] / (1024 * 1024) if data["file_size"] else 0
                     print(f"[ANYMATIX DOWNLOAD] Parallel download completed successfully: {data['file_name']} ({mb_total:.0f}MB)")
-                    return finalize_download(
+                    finalize_download(
                         part_file, file_path, data["file_size"], data["file_name"]
                     )
+                    return finish_download()
                 else:
                     print(f"[ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
@@ -1266,82 +1591,12 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
         # THE RENAME, AND IT IS THE ONLY ONE.
         #
-        # Everything above wrote into `<name>.part`. The parallel path returns
-        # through `finalize_download` itself; reaching here means the
+        # Everything above wrote into `<name>.part`. Reaching here means the
         # single-stream path ran, and this is where its bytes earn the model's
         # name. A short file raises and KEEPS its `.part`, so the next run
         # resumes instead of starting from zero.
         finalize_download(part_file, file_path, data["file_size"], data["file_name"])
-
-        # Final verification: ensure file exists and has correct size before returning
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(
-                f"Download completed but file not found: {file_path}. "
-                f"This may indicate a download failure, filesystem issue, or the file was deleted during download."
-            )
-        
-        if data["file_size"] is not None:
-            actual_size = os.path.getsize(file_path)
-            if actual_size != data["file_size"]:
-                # Self-heal: remove the bad file so the next run starts clean instead
-                # of resuming/appending onto it again (the re-download-forever loop).
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                raise Exception(
-                    f"Downloaded file size mismatch for {data['file_name']}: "
-                    f"expected {data['file_size']} bytes, got {actual_size} bytes. "
-                    f"The corrupted file was removed and will be re-downloaded on the next run."
-                )
-
-        if file_path.lower().endswith(".json") and not is_valid_json_file(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
-            raise Exception(
-                f"Downloaded JSON file is malformed for {data['file_name']}. "
-                f"The corrupted file was removed and will be re-downloaded on the next run."
-            )
-
-        # POST-DOWNLOAD DEDUPLICATION
-        print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
-        sha256 = compute_file_sha256(file_path).lower()
-        data["sha256"] = sha256
-        
-        # Determine canonical filename: original_sha256.ext
-        name_with_hash = data["file_name"]
-        parts = name_with_hash.rsplit("_", 1)
-        if len(parts) > 1:
-            basename = parts[0]
-            suffix = parts[1]
-            ext_parts = suffix.split(".", 1)
-            ext = ("." + ext_parts[1]) if len(ext_parts) > 1 else ""
-        else:
-            basename_parts = name_with_hash.rsplit(".", 1)
-            basename = basename_parts[0]
-            ext = ("." + basename_parts[1]) if len(basename_parts) > 1 else ""
-        
-        canonical_name = f"{basename}_{sha256}{ext}"
-        canonical_path = os.path.join(dir, canonical_name)
-
-        if os.path.exists(canonical_path) and canonical_path != file_path:
-            print(f"[ANYMATIX] Deduplicated model found: {canonical_path}. Reusing.")
-            os.remove(file_path)
-            data["file_name"] = canonical_name
-        else:
-            print(f"[ANYMATIX] New unique model. Naming: {canonical_name}")
-            os.rename(file_path, canonical_path)
-            data["file_name"] = canonical_name
-        
-        # Save sidecar with canonical filename and hash
-        with open(store_path, 'w') as file:
-            json.dump(data, file, indent=4)
-
-        print("Model name:", data["file_name"])
-
-        return os.path.join(dir, data["file_name"])
+        return finish_download()
 
 
 def expand_info_civitai(url):

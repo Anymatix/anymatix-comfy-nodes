@@ -1460,6 +1460,11 @@ class AnymatixFetcher:
                         expand_info=expand_info,
                         effective_url=effective,
                         redact_append=auth,
+                        # The volume is where the models from every earlier run
+                        # live. Without it in scope, a pod whose url was
+                        # repointed at a new revision adopts nothing and pays
+                        # for the whole download again, by the minute.
+                        adopt_dirs=[dir] if cache_dir else None,
                     )
                 except Exception:
                     if not cache_dir:
@@ -1476,9 +1481,13 @@ class AnymatixFetcher:
                         effective_url=effective,
                         redact_append=auth,
                     )
-                if cache_dir:
+                # ONLY MIRROR WHAT IS ACTUALLY ON THE CACHE DISK. `download_file`
+                # may adopt a file out of `adopt_dirs` and hand back a path on
+                # the volume, where mirroring it would mean copying it over
+                # itself from a source that does not exist.
+                if cache_dir and os.path.dirname(os.path.abspath(model_name)) == os.path.abspath(cache_dir):
                     _mirror_cache_entry_async(cache_dir, dir, os.path.basename(model_name))
-                elif durable_has_sidecar:
+                elif os.path.dirname(os.path.abspath(model_name)) == os.path.abspath(dir):
                     # LAST USED, NOT LAST DOWNLOADED. The warm-up stager ranks
                     # by the volume's mtimes, so touching a model every time a
                     # workflow resolves it turns that ranking into a true LRU:
