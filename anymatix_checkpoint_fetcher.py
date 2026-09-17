@@ -21,11 +21,11 @@ import time
 
 try:
     # When loaded as a package inside ComfyUI, use relative import
-    from .fetch import download_file, hash_string
+    from .fetch import download_file, hash_string, satisfied_locally
 except Exception:
     # When running this file directly for testing, fall back to absolute import
     try:
-        from fetch import download_file, hash_string
+        from fetch import download_file, hash_string, satisfied_locally
     except Exception:
         # Provide a helpful error when import truly fails
         raise
@@ -1381,8 +1381,39 @@ class AnymatixFetcher:
                     "Import the file via Anymatix (Add Model) or add the hash-named file under assets/models."
                 )
 
+            # THE EFFECTIVE URL IS NEEDED BEFORE THE DEDUPLICATION CHECK, not
+            # only by the download: it is what the sidecar is named after, so
+            # without it the check below cannot tell whether this url is
+            # already satisfied. Computed once, here.
+            if auth is not None and len(auth) > 0:
+                # Robustly append query parameters using urllib
+                p = urlparse(base_url)
+                existing = parse_qsl(p.query, keep_blank_values=True)
+                to_add = parse_qsl(auth, keep_blank_values=True)
+                new_query = urlencode(existing + to_add)
+                effective = urlunparse(p._replace(query=new_query))
+            else:
+                effective = base_url
+
+            # A URL THIS MACHINE HAS ALREADY FETCHED ASKS NOBODY ANYTHING.
+            #
+            # `expand_info` is an HTTP request to the Civitai API, and it was
+            # issued unconditionally, before `download_file` was even called —
+            # so a Civitai model already on disk paid for a url lookup on every
+            # run, and on a machine with no internet paid for its timeout
+            # instead. `download_file` itself has been answering from the
+            # sidecar by `stat` for some time; this block was the one thing in
+            # front of it that still went to the network.
+            #
+            # Nothing is lost by skipping it: the deduplication it performs is
+            # by the sha256 Civitai states, which is the same hash
+            # `adopt_existing_file` matches on inside `download_file`.
+            already_here = satisfied_locally(
+                [dir, _nvme_cache_twin(dir)], [base_url, effective]
+            )
+
             # PRE-DOWNLOAD DEDUPLICATION CHECK
-            info = expand_info(base_url)
+            info = None if already_here else expand_info(base_url)
             if info and "files" in info:
                 # Find the file that matches the download request (usually first or specific name)
                 # Civitai provides SHA256 hashes in the files list
@@ -1430,16 +1461,6 @@ class AnymatixFetcher:
                 if new_progress != progress:
                     progress = new_progress
                     pbar.update_absolute(progress, 1000)
-
-            if auth is not None and len(auth) > 0:
-                # Robustly append query parameters using urllib
-                p = urlparse(base_url)
-                existing = parse_qsl(p.query, keep_blank_values=True)
-                to_add = parse_qsl(auth, keep_blank_values=True)
-                new_query = urlencode(existing + to_add)
-                effective = urlunparse(p._replace(query=new_query))
-            else:
-                effective = base_url
 
             try:
                 # NVMe-first: bytes land on local disk and the run starts from

@@ -272,18 +272,99 @@ def adopt_existing_file(dirs, canonical_name: str, sha256: str, expected_size,
     Anything that does not verify is skipped with a loud line and the caller
     downloads normally. Adoption never falls back to a file it could not prove.
     """
+    # EVERY 64-HEX VALUE IN THESE LINES SAYS WHICH HASH IT IS.
+    #
+    # They used to read `verifying <file>_ae42d927... against ae42d927... for
+    # <file>_4518bf83....safetensors`, which names two 64-hex values and says
+    # what neither of them is. It reads as a file verified against one hash and
+    # then adopted under a different one, and it was read that way on
+    # 2026-09-17. It is not: `ae42d927...` is the sha256 of the BYTES and
+    # `4518bf83...` is the sha256 of the URL STRING, which is what the sidecar
+    # is named after and what `label` still carries when no content hash has
+    # been recorded for this url yet. A log line that makes a correct system
+    # look broken costs a reading, and this one already has.
+    url_hash = self_sidecar[:-len(".json")] if self_sidecar.endswith(".json") else self_sidecar
     candidates = adoption_candidates(dirs, canonical_name, sha256, self_sidecar, expected_size)
     for path in candidates[:MAX_ADOPTION_CANDIDATES]:
+        name = os.path.basename(path)
         try:
-            print(f"[ANYMATIX ADOPT] verifying {path} against {sha256} for {label}")
+            print(f"[ANYMATIX ADOPT] hashing {name} to check it holds content sha256 "
+                  f"{sha256}, which is what url hash {url_hash} asks for (recorded as {label})")
             actual = compute_file_sha256(path).lower()
             if actual != sha256:
-                print(f"[ANYMATIX ADOPT] {path} hashes to {actual}, not {sha256} - refusing to adopt it")
+                print(f"[ANYMATIX ADOPT] {name} holds content sha256 {actual}, not the "
+                      f"{sha256} url hash {url_hash} asks for - refusing to adopt it")
                 continue
-            print(f"[ANYMATIX ADOPT] adopting {path} for {label}: no download needed")
+            print(f"[ANYMATIX ADOPT] adopting {name} (content sha256 {sha256}) for "
+                  f"url hash {url_hash}: no download needed")
             return path
         except Exception as e:
-            print(f"[ANYMATIX ADOPT] could not verify {path}: {e}")
+            print(f"[ANYMATIX ADOPT] could not hash {name}: {e}")
+    return None
+
+
+def satisfied_by_sidecar(dirpath: str, data: dict) -> Optional[str]:
+    """The model this sidecar describes, when the machine already has it — or
+    None, which means something still has to be decided.
+
+    A `stat`, and nothing else. It is not blind trust: `file_size` is what the
+    SERVER said, so a file that was truncated, swapped for a shorter one, or
+    half-written answers no and is proven again the long way. What it refuses
+    to do is re-prove what was already proven — the hash of a 12 GB weight is
+    ~23 s, and paying it on every run of a card whose models are all present
+    contradicts the only claim the product makes about itself.
+
+    A sidecar with no `file_size` is one whose server stated no Content-Length.
+    Those are the small JSON metadata files, and parsing one is the same order
+    of cost as stat-ing it, so that is the check they get.
+    """
+    name = data.get("file_name")
+    if not name:
+        return None
+    path = os.path.join(dirpath, name)
+    if not os.path.isfile(path):
+        return None
+    size = data.get("file_size")
+    if size is None:
+        if path.lower().endswith(".json") and is_valid_json_file(path):
+            return path
+        return None
+    try:
+        return path if os.path.getsize(path) == size else None
+    except OSError:
+        return None
+
+
+def satisfied_locally(dirs, urls) -> Optional[str]:
+    """The model one of these urls already resolves to, found without asking
+    anybody anything — or None.
+
+    `download_file` answers this question for itself; this is for CALLERS who
+    do something before calling it. `anymatix_checkpoint_fetcher` issues a
+    request to the Civitai API (`expand_info`) ahead of every fetch, to
+    deduplicate by the hash Civitai states — so a Civitai model the machine
+    already holds paid for a url lookup on every single run, and on a machine
+    with no internet paid for its timeout instead. The deduplication that block
+    performs is the one `adopt_existing_file` now performs from the same hash,
+    so skipping it when the url is already satisfied loses nothing and is the
+    difference between a card that runs offline and one that hangs first.
+
+    Several urls because the sidecar is named after the EFFECTIVE url (base
+    plus any auth tail) and the base url is what gets persisted; several dirs
+    because on a pod the bytes may be on the volume or in the NVMe cache.
+    """
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for u in urls:
+            if not u:
+                continue
+            data = read_sidecar(os.path.join(d, f"{hash_string(u)}.json"))
+            if not data:
+                continue
+            hit = satisfied_by_sidecar(d, data)
+            if hit:
+                return hit
     return None
 
 
@@ -1396,6 +1477,37 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
     url_hash = hash_string(effective)
     os.makedirs(dir, exist_ok=True)
     store_path = os.path.join(dir, f"{url_hash}.json")
+
+    # A URL THIS MACHINE HAS ALREADY FETCHED MAKES NO REQUEST AT ALL.
+    #
+    # The sidecar is named `<url hash>.json` INSIDE `dir`, and an adoption
+    # writes it beside the file it names — which, on a pod, is the durable
+    # volume while `dir` is the NVMe cache — and removes the one in `dir`,
+    # because a sidecar in the cache dies with the container and leaves an
+    # orphan pointing at nothing. So the very next call for the same url with
+    # the same `dir` found no sidecar, went to `fetch_headers` (a request), and
+    # then re-hashed the whole weight to adopt it again. Every run: ~23 s per
+    # 12 GB, and a network round trip a fully-downloaded card should not need.
+    #
+    # It did not bite in the shipped app only because
+    # `anymatix_checkpoint_fetcher` checks for the sidecar on the volume before
+    # it chooses a cache dir — a caller keeping a fetcher's promise, which
+    # holds exactly until something calls the fetcher directly.
+    #
+    # Looking here costs one `stat` per adopt dir on the cold path.
+    if not os.path.exists(store_path):
+        for other_dir in (adopt_dirs or []):
+            if not other_dir or os.path.abspath(other_dir) == os.path.abspath(dir):
+                continue
+            cached = read_sidecar(os.path.join(other_dir, f"{url_hash}.json"))
+            if not cached:
+                continue
+            satisfied = satisfied_by_sidecar(other_dir, cached)
+            if satisfied:
+                print(f"[ANYMATIX] {os.path.basename(satisfied)} is already here, "
+                      f"recorded for url hash {url_hash}: nothing to fetch")
+                return satisfied
+
     parsed_url = urlparse(effective)
     file_name_default = parsed_url.path.split('/')[-1].split('?')[0]
     # Always persist base URL, never include token-bearing URL
