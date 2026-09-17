@@ -1058,8 +1058,15 @@ _AUX_ANNOTATOR_TYPES = ("dwpose_aux", "hed", "depth_anything_v2_checkpoint")
 _AUX_HF_LAYOUT_TYPES = ("depth_anything_v2_checkpoint",)
 
 
+# THE REVISION IS PART OF THE URL, AND IT IS NOT ALWAYS `main`.
+# Shipped model urls name a COMMIT (`todos/shipped-model-urls-name-branch-not-commit`,
+# 2026-09-16: "pin them all"), so a pattern that hard-codes `main` refuses the
+# very urls this repo ships — which is how both ControlNet cards died on
+# 2026-09-17. `<revision>` is whatever Hugging Face accepts in a resolve path:
+# a commit sha, a tag, or a branch. It stays one path segment, so a url that is
+# not a Hugging Face resolve url at all is still refused.
 _DWPOSE_AUX_HF_RE = re.compile(
-    r"^https://huggingface\.co/([^/]+)/([^/]+)/resolve/main/([^?#]+)"
+    r"^https://huggingface\.co/([^/?#]+)/([^/?#]+)/resolve/([^/?#]+)/([^?#]+)"
 )
 
 
@@ -1076,13 +1083,19 @@ def _ensure_aux_annotator_ckpts_dir() -> str:
 
 
 def _destination_path_for_dwpose_aux_url(base_url: str, root: str, nested: bool = False) -> str:
-    m = _DWPOSE_AUX_HF_RE.match((base_url or "").strip())
+    url = (base_url or "").strip()
+    m = _DWPOSE_AUX_HF_RE.match(url)
     if not m:
         raise ValueError(
-            "dwpose_aux URL must look like "
-            "https://huggingface.co/<org>/<repo>/resolve/main/<filename>"
+            f"dwpose_aux URL is not a Hugging Face resolve url: {url!r}. It must be "
+            "https://huggingface.co/<org>/<repo>/resolve/<revision>/<filename>, "
+            "where <revision> is a commit, a tag or a branch."
         )
-    fn = m.group(3)
+    # The revision (group 3) belongs to the url, never to the layout:
+    # comfyui_controlnet_aux looks the file up by NAME under
+    # AUX_ANNOTATOR_CKPTS_PATH, so two revisions of one filename are one file
+    # on disk, exactly as before.
+    fn = m.group(4)
     if nested:
         # custom_hf_download's own layout: <ckpts>/<org>/<repo>/<filename>.
         return os.path.join(root, m.group(1), m.group(2), fn)
