@@ -1214,6 +1214,34 @@ def _chatterbox_pack_dir(pack_type: str = "chatterbox_model_pack") -> str:
     return os.path.join(comfy_root, *_chatterbox_pack_spec(pack_type)["subdir"])
 
 
+# THE PACK URL NAMES ITS REVISION, IN THE SAME SHAPE AS EVERY OTHER SHIPPED URL.
+# A pack is several files, so its url is the resolve PREFIX they share:
+#     https://huggingface.co/<org>/<repo>/resolve/<revision>
+# and each file is fetched from <prefix>/<file>. Until 2026-09-18 the card
+# carried a bare repository url and this module appended a literal
+# `/resolve/main/`, so the three Voice cards fetched a moving branch that no
+# library url and no provenance gate could see
+# (`bugs/the-three-voice-cards-fetch-moving-main`). The rule is Vincenzo's,
+# 2026-09-16: "pin them all, and we will update the app at least once per
+# month". A url with no revision is refused, never completed with a guess.
+_CHATTERBOX_HF_PACK_RE = re.compile(
+    r"^https://huggingface\.co/([^/?#]+)/([^/?#]+)/resolve/([^/?#]+)/?$"
+)
+
+
+def _chatterbox_pack_file_url(pack_url: str, pack_file: str) -> str:
+    url = (pack_url or "").strip()
+    m = _CHATTERBOX_HF_PACK_RE.match(url)
+    if not m:
+        raise ValueError(
+            f"Chatterbox pack url does not name a revision: {url!r}. It must be "
+            "https://huggingface.co/<org>/<repo>/resolve/<revision>, where "
+            "<revision> is the commit the card is pinned to."
+        )
+    org, repo, revision = m.group(1), m.group(2), m.group(3)
+    return f"https://huggingface.co/{org}/{repo}/resolve/{revision}/{pack_file}"
+
+
 def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
     """
     Pull a ResembleAI/Chatterbox multi-file pack into the path its node expects.
@@ -1221,15 +1249,15 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
     """
     pack_type = url_dict.get("type") or "chatterbox_model_pack"
     spec = _chatterbox_pack_spec(pack_type)
-    base_url = (url_dict.get("url") or "").rstrip("/")
-    if not base_url:
-        raise ValueError(f"{pack_type} fetch requires a non-empty url")
+    pack_url = url_dict.get("url") or ""
+    pack_files = list(spec["files"])
+    # Every file url is built BEFORE anything is written, so a url with no
+    # revision fails the card at once instead of after a half-fetched pack.
+    file_urls = [(f, _chatterbox_pack_file_url(pack_url, f)) for f in pack_files]
     auth = url_dict.get("auth")
     pack_dir = _chatterbox_pack_dir(pack_type)
     os.makedirs(pack_dir, exist_ok=True)
-    pack_files = list(spec["files"])
-    for pack_file in pack_files:
-        file_url = f"{base_url}/resolve/main/{pack_file}"
+    for pack_file, file_url in file_urls:
         downloaded_path = download_file(
             url=file_url,
             dir=pack_dir,
