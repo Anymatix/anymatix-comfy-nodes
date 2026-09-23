@@ -347,6 +347,37 @@ def adopt_existing_file(dirs, canonical_name: str, sha256: str, expected_size,
     return None
 
 
+# HOW A MODEL ON DISK WAS LAST PROVEN, recorded in its sidecar as
+# `verification`. Vincenzo, 2026-09-23, watching a download sit on
+# "VERIFYING MODEL 9%": "it's a showstopper; for now do skip verification if
+# size matches (and memorize the sizes)". So a finished download whose byte
+# length is the one the server stated is accepted on that length alone, and
+# the sidecar says so rather than pretending a hash was taken:
+#
+#   "size"    the length matched; no sha256 was computed over these bytes
+#   "sha256"  the bytes were hashed (no size to compare with, or the file was
+#             adopted, which always hashes)
+#
+# The Models manager is to show this and offer a hash on demand (release 1.1,
+# TRACKERS/FEATURES/skip-model-verification-when-size-matches-models).
+VERIFIED_BY_SIZE = "size"
+VERIFIED_BY_SHA256 = "sha256"
+
+
+def remembered_size(data: dict):
+    """The byte length a sidecar lets us check a file against, or None.
+
+    `file_size` is what the SERVER said (Content-Length) and always wins.
+    `verified_size` is what THIS code measured on a file it had just proven,
+    written for the servers that state no length — the "memorize the sizes"
+    half of the 2026-09-23 request — so the next check is a `stat` too.
+    """
+    size = data.get("file_size")
+    if size is None:
+        size = data.get("verified_size")
+    return size
+
+
 def satisfied_by_sidecar(dirpath: str, data: dict) -> Optional[str]:
     """The model this sidecar describes, when the machine already has it — or
     None, which means something still has to be decided.
@@ -368,7 +399,7 @@ def satisfied_by_sidecar(dirpath: str, data: dict) -> Optional[str]:
     path = os.path.join(dirpath, name)
     if not os.path.isfile(path):
         return None
-    size = data.get("file_size")
+    size = remembered_size(data)
     if size is None:
         if path.lower().endswith(".json") and is_valid_json_file(path):
             return path
@@ -1489,7 +1520,20 @@ def resumed_part_is_the_whole_file(part_file: str, expected_size, remote_sha256,
     is how a card comes to render static. The caller discards it and downloads
     again; a SHORT part file is untouched by all this and still resumes from
     its real prefix, which is the whole reason the `.part` scheme exists.
+
+    THE RECORD IS ASKED FIRST since 2026-09-23 ("skip verification if size
+    matches"). For a part file the size is no evidence at all — it is
+    pre-allocated — so the downloader's completion record is what "the size
+    matches" means here: it says every byte of the declared length arrived. It
+    used to be outranked by the server's hash, which cost a full sha256 pass
+    (minutes, on a multi-GB weight) every time a process died between the last
+    byte and the rename. A part file with NO record is still hashed when the
+    server states a hash: that is the pre-allocated file of a killed transfer,
+    exactly the fmt-5000 case above, and it is not relaxed.
     """
+    if part_completion_is_recorded(part_file, expected_size):
+        print(f"[ANYMATIX DOWNLOAD] The downloader recorded {label} as complete before it died")
+        return True
     if remote_sha256:
         try:
             actual = compute_file_sha256(part_file, progress=progress).lower()
@@ -1503,9 +1547,6 @@ def resumed_part_is_the_whole_file(part_file: str, expected_size, remote_sha256,
         print(f"[ANYMATIX DOWNLOAD] The resumed part file for {label} hashes to {actual}, "
               f"not the {remote_sha256} the server states - discarding it")
         return False
-    if part_completion_is_recorded(part_file, expected_size):
-        print(f"[ANYMATIX DOWNLOAD] The downloader recorded {label} as complete before it died")
-        return True
     print(f"[ANYMATIX DOWNLOAD] A full-size part file for {label} with no completion record "
           f"and no server hash to check it against proves nothing - downloading again")
     return False
@@ -1743,7 +1784,34 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     f"The corrupted file was removed and will be re-downloaded on the next run."
                 )
 
-            # POST-DOWNLOAD DEDUPLICATION
+            # THE LENGTH THE SERVER STATED IS THE PROOF (2026-09-23).
+            #
+            # Vincenzo watched a fresh download sit on "VERIFYING MODEL 9%" —
+            # this hash, over every byte just written — and called it a
+            # showstopper: "for now do skip verification if size matches". The
+            # size was checked just above against the server's Content-Length,
+            # and `finalize_download` only names a part file once the
+            # downloader has written its whole declared length.
+            #
+            # What is given up, deliberately: the comparison with the hash the
+            # server states (`remote_stated_sha256`) and the content-addressed
+            # rename. The file KEEPS its url-hash name, because a name that
+            # asserts a content sha256 may only be produced by computing one —
+            # the rule `library-asset-hash-integrity` rests on, and the reason
+            # adoption re-hashes whatever it finds under such a name. The
+            # sidecar says `verification: "size"` so nothing reads this as
+            # hashed, and the Models manager can offer the hash later.
+            if data["file_size"] is not None:
+                print(f"[ANYMATIX] {data['file_name']} has the {data['file_size']} bytes the "
+                      f"server stated: accepted on its size, not hashed")
+                data["verification"] = VERIFIED_BY_SIZE
+                data["verified_size"] = data["file_size"]
+                with open(store_path, 'w') as file:
+                    json.dump(data, file, indent=4)
+                return file_path
+
+            # POST-DOWNLOAD DEDUPLICATION — only for a file whose server stated
+            # no length, so there was nothing to compare it with.
             print(f"[ANYMATIX] Computing hash for deduplication: {file_path}")
             sha256 = compute_file_sha256(file_path, progress=verifying).lower()
 
@@ -1768,6 +1836,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 )
 
             data["sha256"] = sha256
+            data["verification"] = VERIFIED_BY_SHA256
+            # MEMORIZE THE SIZE: the server stated none, so the next run would
+            # otherwise have nothing but a hash to recognise this file by.
+            data["verified_size"] = os.path.getsize(file_path)
 
             canonical_name = canonical_model_name(data["file_name"], sha256)
             canonical_path = os.path.join(dir, canonical_name)
@@ -1850,6 +1922,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                         pass
                     clear_part_completion(part_file)
                     local_file_size = 0
+        elif data.get("verified_size") is not None and os.path.isfile(file_path) \
+                and os.path.getsize(file_path) == data["verified_size"]:
+            # No length from the server, but one memorized when this file was
+            # proven: a `stat`, not a hash, exactly as for a stated length.
+            return file_path
         elif data["file_size"] is None and os.path.exists(file_path) and file_path.lower().endswith(".json"):
             if is_valid_json_file(file_path):
                 return file_path
@@ -1897,6 +1974,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 # above without hashing anything, so the verification is paid
                 # once per url, not once per run.
                 data["file_name"] = os.path.basename(adopted)
+                # Adoption always hashes (it trusts no name and no size), so
+                # this file is hash-proven and its length can be memorized.
+                data["verification"] = VERIFIED_BY_SHA256
+                data["verified_size"] = os.path.getsize(adopted)
                 # The sidecar lives beside the file it names, or it dies with a
                 # container the file survives — and leaves an orphan behind
                 # pointing at nothing.

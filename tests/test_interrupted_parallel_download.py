@@ -149,11 +149,12 @@ def test_a_full_size_part_file_is_checked_against_the_servers_hash(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         provisional = "model_%s.safetensors" % hash_string(url)
         part = os.path.join(d, provisional + ".part")
-        # The full length, the wrong bytes, and a completion record that says
-        # it finished: the server's hash still refuses it.
+        # The full length, the wrong bytes, and NO completion record: the
+        # pre-allocated file of a killed transfer. The server's hash refuses it.
+        # (With a record it is believed -- see the next test -- since the
+        # 2026-09-23 size skip.)
         with open(part, "wb") as f:
             f.write(b"\0" * len(payload))
-        fetch.mark_part_complete(part, len(payload))
         with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
             json.dump({
                 "url": url,
@@ -168,6 +169,83 @@ def test_a_full_size_part_file_is_checked_against_the_servers_hash(monkeypatch):
         assert _FakeSession.bytes_served > 0, "the wrong bytes were accepted"
         assert open(got, "rb").read() == payload
         assert not os.path.exists(part)
+
+
+def test_a_completion_record_is_believed_without_hashing(monkeypatch):
+    """SKIP VERIFICATION IF SIZE MATCHES (Vincenzo, 2026-09-23).
+
+    For a part file the size is pre-allocated and proves nothing; the
+    downloader's completion record is what "the whole declared length arrived"
+    means. It is now asked BEFORE the server's hash, so a process that died
+    between the last byte and the rename costs a rename, not a multi-GB sha256.
+    The price is named here on purpose: a part file whose record is right and
+    whose bytes are wrong is accepted.
+    """
+    payload = b"z-image turbo weights" * 500
+    url = "https://huggingface.co/x/y/resolve/abc/model.safetensors"
+    monkeypatch.setattr(fetch, "requests", _FakeRequests(payload))
+    monkeypatch.setattr(fetch, "REQUESTS_AVAILABLE", True)
+
+    def no_hash(*a, **k):
+        raise AssertionError("a size-proven file was hashed")
+    monkeypatch.setattr(fetch, "compute_file_sha256", no_hash)
+
+    with tempfile.TemporaryDirectory() as d:
+        provisional = "model_%s.safetensors" % hash_string(url)
+        part = os.path.join(d, provisional + ".part")
+        with open(part, "wb") as f:
+            f.write(payload)
+        fetch.mark_part_complete(part, len(payload))
+        with open(os.path.join(d, "%s.json" % hash_string(url)), "w") as f:
+            json.dump({
+                "url": url,
+                "file_name": provisional,
+                "file_size": len(payload),
+                "remote_sha256": hashlib.sha256(payload).hexdigest(),
+            }, f)
+
+        _FakeSession.bytes_served = 0
+        got = download_file(url=url, dir=d)
+
+        assert _FakeSession.bytes_served == 0
+        assert open(got, "rb").read() == payload
+        with open(os.path.join(d, "%s.json" % hash_string(url))) as f:
+            assert json.load(f)["verification"] == "size"
+
+
+def test_a_download_of_the_stated_length_is_accepted_on_its_size():
+    """The other half of the 2026-09-23 reversal, and what it gives up.
+
+    The server states a hash the bytes do not have, but the length is right:
+    the download is accepted on its size and NOT hashed. What still holds from
+    the z-image lesson below: our own measurement is never recorded as the
+    truth about this url (nothing was measured), and the file is not given a
+    content-addressed name, because only a computed hash may produce one."""
+    blob = os.urandom(1 << 20)
+    server, port, _ = serve(blob)
+    directory = tempfile.mkdtemp()
+    url = f"http://127.0.0.1:{port}/weights.bin"
+    lie = "a" * 64
+    try:
+        with open(os.path.join(directory, "%s.json" % hash_string(url)), "w") as f:
+            json.dump({
+                "url": url,
+                "file_name": _provisional(url),
+                "file_size": len(blob),
+                "remote_sha256": lie,
+            }, f)
+
+        got = download_file(url=url, dir=directory)
+
+        assert os.path.basename(got) == _provisional(url), \
+            "a content-addressed name was produced without computing a hash"
+        with open(os.path.join(directory, "%s.json" % hash_string(url))) as f:
+            stored = json.load(f)
+        assert stored["verification"] == "size"
+        assert stored["verified_size"] == len(blob)
+        assert stored.get("sha256") != hashlib.sha256(blob).hexdigest()
+    finally:
+        server.shutdown()
 
 
 def test_a_sidecar_never_records_a_hash_the_server_did_not_state():
@@ -185,12 +263,15 @@ def test_a_sidecar_never_records_a_hash_the_server_did_not_state():
     lie = "a" * 64
     try:
         # A warm sidecar that already carries the server's claim, and the claim
-        # is not what the server will serve.
+        # is not what the server will serve. NO LENGTH: since 2026-09-23 a
+        # stated length that matches is accepted without a hash (the test
+        # above), so the hash — and this check — runs only where the server
+        # stated none.
         with open(os.path.join(directory, "%s.json" % hash_string(url)), "w") as f:
             json.dump({
                 "url": url,
                 "file_name": _provisional(url),
-                "file_size": len(blob),
+                "file_size": None,
                 "remote_sha256": lie,
             }, f)
 

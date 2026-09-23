@@ -364,11 +364,19 @@ def test_a_download_is_named_by_its_content(monkeypatch):
     monkeypatch.setattr(fetch, "requests", _FakeRequests(payload))
     monkeypatch.setattr(fetch, "REQUESTS_AVAILABLE", True)
 
+    # SINCE 2026-09-23 ONLY WHEN THE SERVER STATED NO LENGTH. A download whose
+    # length matches the stated one is accepted on its size, not hashed
+    # ("skip verification if size matches"), and so keeps its url-hash name:
+    # a content-addressed name may only be produced by computing the hash.
+    # The server's claim is still in the sidecar as `sha256`, which is what
+    # adoption finds the file by if the url is later repointed.
     with tempfile.TemporaryDirectory() as d:
         got = download_file(url=url, dir=d)
-        assert os.path.basename(got) == "krea2_darkbrush_%s.safetensors" % sha
+        assert os.path.basename(got) == "krea2_darkbrush_%s.safetensors" % hash_string(url)
         with open(os.path.join(d, "%s.json" % hash_string(url))) as f:
-            assert json.load(f)["sha256"] == sha
+            stored = json.load(f)
+        assert stored["sha256"] == sha
+        assert stored["verification"] == "size"
 
 
 def test_a_completed_part_file_is_named_by_its_content_too(monkeypatch):
@@ -401,7 +409,10 @@ def test_a_completed_part_file_is_named_by_its_content_too(monkeypatch):
         got = download_file(url=url, dir=d)
 
         assert _FakeSession.bytes_served == 0
-        assert os.path.basename(got) == "model_%s.safetensors" % sha
+        # Accepted on its record and its stated length (2026-09-23): not
+        # hashed, so it keeps the url-hash name.
+        assert os.path.basename(got) == provisional
+        assert open(got, "rb").read() == payload
         assert not os.path.exists(part)
         assert not os.path.exists(fetch.completion_marker_for(part))
 

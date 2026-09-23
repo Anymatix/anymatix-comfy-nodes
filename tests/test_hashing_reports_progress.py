@@ -222,12 +222,43 @@ def test_a_download_says_fetching_and_then_verifies_what_it_wrote(monkeypatch):
         )
 
     phases = [name for kind, name, _ in timeline if kind == "phase"]
-    # Nothing on disk to adopt, so: fetch the bytes, then hash them to name the
-    # file by its content. Both are waits and both are named.
+    # Nothing on disk to adopt, so: fetch the bytes. SINCE 2026-09-23 THAT IS
+    # ALL: the length is the one the server stated, so the file is accepted on
+    # its size and never hashed - this is the "VERIFYING MODEL 9%" Vincenzo
+    # called a showstopper. No VERIFYING after a download of the right length.
+    assert phases == ["fetching"], phases
+
+
+def test_a_download_with_no_stated_length_is_hashed_and_its_size_memorized(monkeypatch):
+    # Where the server states no length there is nothing to compare with, so
+    # the hash still runs - once. Its size is then memorized in the sidecar, so
+    # the next check is a `stat` like any other.
+    payload = b"no content length" * 300
+    phases = []
+
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "%s.json" % hash_string(URL)), "w") as f:
+            json.dump({"url": URL, "file_name": "m_%s.safetensors" % hash_string(URL),
+                       "file_size": None}, f)
+        _serving(monkeypatch, payload)
+        got = download_file(url=URL, dir=d, phase=lambda name: phases.append(name))
+        with open(os.path.join(d, "%s.json" % hash_string(URL))) as f:
+            stored = json.load(f)
+        assert stored["verification"] == "sha256"
+        assert stored["verified_size"] == len(payload)
+        assert stored["sha256"] == hashlib.sha256(payload).hexdigest()
+
+        def no_hash(*a, **k):
+            raise AssertionError("a memorized size was not enough")
+        monkeypatch.setattr(fetch, "compute_file_sha256", no_hash)
+        again = []
+        assert download_file(url=URL, dir=d, phase=lambda name: again.append(name)) == got
+        assert again == []
+
     assert phases == ["fetching", "verifying"], phases
 
 
-def test_a_resumed_part_file_is_verified_under_its_own_word(monkeypatch):
+def test_a_recorded_resumed_part_file_is_neither_hashed_nor_announced(monkeypatch):
     payload = b"interrupted then finished" * 300
     timeline = []
 
@@ -249,18 +280,20 @@ def test_a_resumed_part_file_is_verified_under_its_own_word(monkeypatch):
         )
 
     phases = [name for kind, name, _ in timeline if kind == "phase"]
-    # THE WORST CASE THE ITEM MEASURED, and it is honest about both halves.
-    # Where the server stated a hash, the part file is proven against it and
-    # then the result is hashed again to name it by its content: two full
-    # passes over a 12 GB weight, ~2x23 s, and no fetch at all. Two bars, each
-    # starting at zero, each under the word for what it is.
-    assert phases == ["verifying", "verifying"], phases
+    # THE WORST CASE THE ITEM MEASURED used to be two full passes over a 12 GB
+    # weight (~2x23 s): the part file proven against the server's hash, then
+    # hashed again to name it by its content. Since 2026-09-23 the downloader's
+    # completion record and the stated length are the proof, and neither pass
+    # runs. A part file with NO record is still hashed (the killed-transfer
+    # case in test_interrupted_parallel_download).
+    assert phases == [], phases
 
 
-def test_a_part_file_proven_by_its_completion_record_hashes_only_once(monkeypatch):
+def test_a_part_file_proven_by_its_completion_record_is_not_hashed(monkeypatch):
     # No server hash to check against, so the resumed part is proven by the
-    # downloader's own record instead - which reads no bytes. Only the naming
-    # hash is a wait, and only it is announced.
+    # downloader's own record instead - which reads no bytes. The naming hash
+    # that followed it is gone too since 2026-09-23: the length matches the
+    # stated one, so nothing is hashed and nothing is announced.
     payload = b"interrupted then finished" * 300
     phases = []
 
@@ -276,7 +309,7 @@ def test_a_part_file_proven_by_its_completion_record_hashes_only_once(monkeypatc
         _serving(monkeypatch, payload)
         download_file(url=URL, dir=d, phase=lambda name: phases.append(name))
 
-    assert phases == ["verifying"], phases
+    assert phases == [], phases
 
 
 def test_a_satisfied_url_announces_no_phase_at_all(monkeypatch):
