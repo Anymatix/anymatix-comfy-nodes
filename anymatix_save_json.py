@@ -2,6 +2,8 @@ import json as json_module
 import os
 import folder_paths
 
+from .anymatix_atomic_write import atomic_output
+
 
 def to_json_serializable(value):
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -78,11 +80,11 @@ class AnymatixSaveJson:
         file_path = os.path.join(output_path, filename)
 
         try:
-            with open(file_path, "w") as f:
+            with atomic_output(file_path, "w") as (f, _tmp):
                 data_to_save = to_json_serializable(json)
                 json_module.dump(data_to_save, f, indent=2)
                 print(f"Data saved to: {file_path}")
-                
+
         except Exception as e:
             print(f"Unable to save data to {file_path}: {e}")
 

@@ -8,6 +8,7 @@ import numpy as np
 import json
 
 from .anymatix_output_formats import IMAGE_EXTENSIONS, write_image
+from .anymatix_atomic_write import atomic_output
 
 
 class Anymatix_Image_Save:
@@ -137,7 +138,7 @@ class Anymatix_Image_Save:
                 os.path.join(output_path, f"{filename_prefix}.json")
             )
             json_obj = {"count": total_images}
-            with open(json_output_file, "w") as outfile:
+            with atomic_output(json_output_file, "w") as (outfile, _tmp):
                 json.dump(json_obj, outfile)
             print(f"anymatix: JSON written first with count={total_images}")
         

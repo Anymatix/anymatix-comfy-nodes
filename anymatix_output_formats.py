@@ -43,6 +43,16 @@ except ImportError:  # pragma: no cover - opencv is in requirements.txt
 
 from PIL import Image
 
+try:
+    from .anymatix_atomic_write import cleanup_temp, publish, temp_path_for
+except ImportError:
+    # Loaded standalone (e.g. by tests via spec_from_file_location), with no
+    # package context for a relative import to resolve against.
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from anymatix_atomic_write import cleanup_temp, publish, temp_path_for
+
 
 # ---------------------------------------------------------------- images ----
 
@@ -96,7 +106,22 @@ def write_image(
 
     Raises `RuntimeError` when the build cannot write the format. See the
     module docstring for why that is not a fallback.
+
+    `path` never sees a partial file: the frame is written to a hidden temp
+    name in the same directory and `os.replace()`d into place only once it is
+    complete, so a reader polling `path` by URL never observes a half-written
+    image. See `anymatix_atomic_write.py`.
     """
+    temp_path = temp_path_for(path)
+    try:
+        _write_image_to(temp_path, image, extension, quality, lossless_webp, bit_depth, fast)
+        publish(temp_path, path)
+    except BaseException:
+        cleanup_temp(temp_path)
+        raise
+
+
+def _write_image_to(path, image, extension, quality, lossless_webp, bit_depth, fast):
     image = np.asarray(image, dtype=np.float32)
     extension = extension.lower().lstrip(".")
 

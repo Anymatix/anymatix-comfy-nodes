@@ -4,6 +4,7 @@ import av
 import folder_paths
 
 from .anymatix_output_formats import AUDIO_FORMATS, audio_format
+from .anymatix_atomic_write import atomic_output
 
 
 class AnymatixSaveAudio:
@@ -114,11 +115,19 @@ class AnymatixSaveAudio:
 
                 output_container.close()
 
-                # Write the output to file and fsync so it is visible to the
-                # serving layer immediately after execution_success.
+                # Encoded to a buffer first so an empty encode is caught
+                # before anything touches the final path. The write itself
+                # goes to a temp file in the same directory, fsynced and
+                # `os.replace()`d into place, so a reader polling
+                # `output_file` by URL never sees a partial file.
                 output_buffer.seek(0)
-                with open(output_file, "wb") as f:
-                    f.write(output_buffer.getbuffer())
+                encoded = output_buffer.getbuffer()
+                if len(encoded) == 0:
+                    print(f"Error: Audio encode for {output_file} produced no bytes")
+                    return {"ui": {"audio": []}}
+
+                with atomic_output(output_file, "wb") as (f, _tmp):
+                    f.write(encoded)
                     f.flush()
                     os.fsync(f.fileno())
 
