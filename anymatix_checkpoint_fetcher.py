@@ -53,6 +53,36 @@ def verify_model_file_exists(file_path: str, model_type: str = "model") -> None:
         )
 
 
+def _sidecar_verified_size_matches(file_path: str, sidecar: dict) -> bool:
+    """A file existing is not a file being WHOLE.
+
+    bugs/is-changed-serves-truncated-weight-as-whole: `IS_CHANGED` asked only
+    `os.path.exists(file_path)`, so a mirror interrupted after the sidecar was
+    written, a disk that filled mid-copy, or an adoption pointing at a file
+    something later truncated all answered "unchanged" and were handed to the
+    sampler as though whole.
+
+    `verified_size` is the one sidecar field set only once completeness was
+    actually established: by the length the server declared, which
+    `download_file` now accepts on its own (2026-09-23, "for now do skip
+    verification if size matches" — do not regress that skip by re-hashing
+    here), or, when the server stated no length at all, by the hash step that
+    measured the file it just wrote. Comparing against it costs a `stat`, the
+    same thing the size-skip itself costs, never a re-hash.
+
+    A sidecar with no `verified_size` (written before this field existed, or a
+    deduplication pointer at a file another url finished) makes no claim to
+    check, so it is not treated as a mismatch.
+    """
+    verified_size = sidecar.get("verified_size")
+    if verified_size is None:
+        return True
+    try:
+        return os.path.getsize(file_path) == verified_size
+    except OSError:
+        return False
+
+
 # ── The GGUF loader is OPTIONAL, like every other sibling this pack wraps ────
 #
 # This block used to run at import time with no guard: it built the path to
@@ -1772,6 +1802,13 @@ class AnymatixFetcher:
             # If model file doesn't exist, force re-download
             if not os.path.exists(file_path):
                 print(f"[ANYMATIX IS_CHANGED] Model file missing, forcing re-download: {file_path}")
+                return float("NaN")
+
+            if not _sidecar_verified_size_matches(file_path, data):
+                print(
+                    f"[ANYMATIX IS_CHANGED] {file_path} does not have the size its "
+                    f"sidecar verified ({data.get('verified_size')} bytes), forcing re-download"
+                )
                 return float("NaN")
 
             if file_path.lower().endswith(".json"):

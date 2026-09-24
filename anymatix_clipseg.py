@@ -12,7 +12,13 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 CLIPSEG_MODEL_ID = "CIDAS/clipseg-rd64-refined"
-CLIPSEG_BASE_URL = f"https://huggingface.co/{CLIPSEG_MODEL_ID}/resolve/main"
+# Pinned, not `main`: bugs/create-mask-fetches-clipseg-from-moving-main.
+# `AnymatixCLIPSeg` takes no url input (its INPUT_TYPES has none), so a
+# pinned constant is the fix, same standing rule as every other shipped url
+# (todos/shipped-model-urls-name-branch-not-commit, 2026-09-16): "pin them
+# all, and we will update the app at least once per month".
+CLIPSEG_REVISION = "999e0328d9e10b484360c477313983f9afdd7050"
+CLIPSEG_BASE_URL = f"https://huggingface.co/{CLIPSEG_MODEL_ID}/resolve/{CLIPSEG_REVISION}"
 
 # Files to download from the HuggingFace repository (preserving original names)
 CLIPSEG_CONFIG_FILES = [
