@@ -42,8 +42,16 @@ def temp_path_for(final_path):
 
 
 def fsync_path(path):
-    """fsync the file's data at `path` without disturbing its mode/flags."""
-    fd = os.open(path, os.O_RDONLY)
+    """
+    fsync the file's data at `path` without disturbing its mode/flags.
+
+    Opened READ-WRITE: on Windows `os.fsync` is `_commit`, which refuses a
+    read-only descriptor with EBADF — every save on Windows failed with
+    "[Errno 9] Bad file descriptor" (anymatix bugs/windows-fsync-read-only-
+    descriptor-every-save-fails). POSIX accepts either; the temp file is ours
+    and writable, so O_RDWR costs nothing there.
+    """
+    fd = os.open(path, os.O_RDWR)
     try:
         os.fsync(fd)
     finally:
