@@ -59,6 +59,11 @@ from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
 from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
 from .host_compute_metrics import sample_host_compute_metrics
+from . import anymatix_comfy_compat
+
+# ComfyUI's audio encoders, fixed for half precision at import time rather than
+# by editing ComfyUI's files: see anymatix_comfy_compat.py.
+anymatix_comfy_compat.apply(log=print, warn=print)
 
 NODE_CLASS_MAPPINGS = {
     # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
