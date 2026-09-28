@@ -83,6 +83,56 @@ def hash_string(input_string):
     return hash_object.hexdigest()
 
 
+# ── NVMe cache vs. the durable volume ────────────────────────────────────────
+#
+# The NVMe cache (ANYMATIX_NVME_MODEL_CACHE) is a read-only-by-convention
+# overlay: `extra_model_paths.yaml` puts it first in the search order so loads
+# come from local disk, but a pod STOP wipes it — only the durable directory
+# (the volume, on a pod) survives. Anything that WRITES a model file — a
+# download, or an upload of a user's own weights — must therefore pick the
+# first search path that is *not* the cache, never `paths[0]` blindly.
+#
+# bugs/an-uploaded-user-model-may-land-nvme: `/anymatix/uploadAsset` used
+# `folder_paths.get_folder_paths(key)[0]` directly and landed a user's
+# imported model in the cache, which a pod stop then wipes with no URL to
+# re-fetch it from. `get_anymatix_models_dir` in `anymatix_checkpoint_fetcher.py`
+# already got this right for downloads; these two functions are that same
+# logic, pulled out so both callers share one definition and it can be unit
+# tested without booting ComfyUI.
+def is_under_nvme_cache(path: str, cache_root: Optional[str] = None) -> bool:
+    """True when `path` is the NVMe cache directory or inside it.
+
+    `cache_root` defaults to the `ANYMATIX_NVME_MODEL_CACHE` environment
+    variable; pass it explicitly to test without touching the environment.
+    """
+    if cache_root is None:
+        cache_root = os.environ.get("ANYMATIX_NVME_MODEL_CACHE") or ""
+    cache_root = cache_root.strip()
+    if not cache_root:
+        return False
+    cache_root = os.path.normpath(cache_root)
+    p = os.path.normpath(path)
+    return p == cache_root or p.startswith(cache_root + os.sep)
+
+
+def pick_durable_dir(dirs, cache_root: Optional[str] = None) -> Optional[str]:
+    """The first of `dirs` that is not under the NVMe cache — the one
+    directory a write survives a pod stop in.
+
+    Falls back to `dirs[0]` when every candidate is under the cache (or the
+    cache is not configured at all, in which case nothing is skipped) so a
+    caller never gets `None` back for a non-empty list where nothing else
+    applies. Returns `None` only for an empty or falsy `dirs`.
+    """
+    dirs = list(dirs or [])
+    if not dirs:
+        return None
+    for d in dirs:
+        if not is_under_nvme_cache(d, cache_root):
+            return d
+    return dirs[0]
+
+
 def is_valid_json_file(file_path: str) -> bool:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:

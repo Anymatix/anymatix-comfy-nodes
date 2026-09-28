@@ -15,6 +15,7 @@ import socket
 import threading
 from server import PromptServer
 import app
+from .fetch import pick_durable_dir
 
 from .anymatix_checkpoint_fetcher import (
     # AnymatixCheckpointFetcher,
@@ -736,7 +737,17 @@ async def upload_asset(request):
                         return web.Response(status=400, text=f"Unknown folder_paths key: {folder_paths_key}")
                     if not dest_dirs:
                         return web.Response(status=400, text=f"No paths for folder_paths key: {folder_paths_key}")
-                    dest_dir = dest_dirs[0]
+                    # bugs/an-uploaded-user-model-may-land-nvme: indexing this
+                    # list at its front used to pick the NVMe cache whenever
+                    # one is configured — the
+                    # extra_model_paths.yaml block puts it first on purpose, so
+                    # loads read local disk. Written there, a user's own model
+                    # (no URL to re-fetch it from) is wiped by the next pod
+                    # stop. Land it on the first durable (non-cache) path
+                    # instead, exactly like a download destination already does
+                    # in `get_anymatix_models_dir`.
+                    dest_dir = pick_durable_dir(dest_dirs)
+
                     os.makedirs(dest_dir, exist_ok=True)
                     file_path = os.path.join(dest_dir, f"{hash_value}.{file_extension}")
                 else:
