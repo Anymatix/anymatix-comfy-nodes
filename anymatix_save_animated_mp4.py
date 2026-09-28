@@ -13,6 +13,7 @@ from .anymatix_output_formats import (
     video_container,
 )
 from .anymatix_ai_disclosure import ffmpeg_metadata_args, mark_file
+from .anymatix_c2pa import sign_file
 from .anymatix_frame_integrity import (
     FramesAreNotAPicture,
     describe_frames_that_are_not_a_picture,
@@ -542,8 +543,11 @@ class AnymatixSaveAnimatedMP4:
             _tmp_sz = os.path.getsize(temp_file_path) if _tmp_exists else 0
             _save_mp4_dbg("ATOMIC_PRE", f"temp_exists={_tmp_exists} temp_size={_tmp_sz}")
             if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
-                # Best-effort, and appended only: never fails the save.
+                # Best-effort, both: never fails the save. The label is
+                # appended; the C2PA manifest is signed over it into a
+                # sibling that replaces the staged file only when complete.
                 mark_file(temp_file_path, container)
+                sign_file(temp_file_path, container)
                 with open(temp_file_path, 'r+b') as f:
                     os.fsync(f.fileno())
 

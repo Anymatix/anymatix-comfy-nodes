@@ -15,7 +15,7 @@
 # 2026-09-07 and `https://api.comfy.org/publishers/anymatix` answers 200.
 #
 # `dependencies` is this pack's own requirements.txt with the prose stripped —
-# nine packages, compared line by line at this commit. The registry installs
+# eleven packages, compared line by line at this commit. The registry installs
 # from THIS list, not from requirements.txt.
 #
 # `license = { file = "LICENSE" }` resolves: LICENSE is present here and is
@@ -49,6 +49,8 @@ dependencies = [
     "aiohttp>=3.8.0",
     "aiofiles>=0.8.0",
     "shapely",
+    "c2pa-python==0.37.12",
+    "cryptography>=42.0.0",
 ]
 
 [project.urls]

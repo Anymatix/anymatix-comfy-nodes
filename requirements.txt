@@ -24,3 +24,10 @@ aiofiles>=0.8.0        # Async file I/O for non-blocking operations
 
 # Added for mask to sam coordinates
 shapely                # Manipulation and analysis of geometric objects in the Cartesian plane
+
+# C2PA (Content Credentials) manifest on every result, over the IPTC label
+# (anymatix_c2pa.py). Pinned exactly: the manifest was verified against this
+# release. Wheels: macOS arm64/x86_64, Windows x64/arm64, manylinux_2_28
+# x86_64/aarch64. cryptography generates the per-install signing key.
+c2pa-python==0.37.12
+cryptography>=42.0.0

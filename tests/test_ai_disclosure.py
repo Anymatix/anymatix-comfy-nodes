@@ -225,7 +225,9 @@ def test_a_label_that_fails_never_fails_the_image(tmp_path, monkeypatch):
     formats.write_image(a_gradient(), path, extension="png")
     assert cv2.imread(path) is not None
     with open(path, "rb") as f:
-        assert URI.encode() not in f.read()
+        # The XMP packet, not the URI: the C2PA manifest signed over the file
+        # (`anymatix_c2pa.py`) carries the URI too, and is not what failed.
+        assert disclosure.XMP_PACKET not in f.read()
     assert no_stray_temp_files(str(tmp_path)) == []
 
 

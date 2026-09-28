@@ -7,9 +7,14 @@ WHY IT EXISTS
   that generates image, audio or video must mark the output in a
   machine-readable way. Anymatix decided (2026-09-28, TRACKERS item
   `c2pa-content-credentials-marking-decided-2026-08-13-not`) to meet it with
-  UNSIGNED standard metadata: no certificate, no C2PA manifest, no watermark.
-  A signing key inside a desktop app can be extracted, so a signature would
-  change the effort needed to forge the label, not whether it can be forged.
+  UNSIGNED standard metadata: no certificate, no watermark. A signing key
+  inside a desktop app can be extracted, so a signature would change the
+  effort needed to forge the label, not whether it can be forged.
+
+  Later the same day a self-signed C2PA manifest was added ON TOP of this
+  label -- `anymatix_c2pa.py`, called right after this module at every call
+  site. This module stays unsigned and free of dependencies; the label is
+  written whether or not the manifest can be.
 
 WHAT IS WRITTEN -- and it is the same three constants in every format
 

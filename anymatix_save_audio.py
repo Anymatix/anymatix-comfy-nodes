@@ -6,6 +6,7 @@ import folder_paths
 from .anymatix_output_formats import AUDIO_FORMATS, audio_format
 from .anymatix_atomic_write import atomic_output
 from .anymatix_ai_disclosure import mark_bytes, set_container_tags
+from .anymatix_c2pa import sign_bytes
 
 
 class AnymatixSaveAudio:
@@ -129,8 +130,9 @@ class AnymatixSaveAudio:
                 if len(encoded) == 0:
                     print(f"Error: Audio encode for {output_file} produced no bytes")
                     return {"ui": {"audio": []}}
-                # Best-effort: the unlabelled bytes come back on any failure.
-                encoded = mark_bytes(encoded, extension)
+                # Best-effort, both: the label, then the C2PA manifest over
+                # it; on any failure the bytes come back as they were.
+                encoded = sign_bytes(mark_bytes(encoded, extension), extension)
 
                 with atomic_output(output_file, "wb") as (f, _tmp):
                     f.write(encoded)
