@@ -12,6 +12,7 @@ from .anymatix_output_formats import (
     video_codec_args,
     video_container,
 )
+from .anymatix_ai_disclosure import ffmpeg_metadata_args, mark_file
 from .anymatix_frame_integrity import (
     FramesAreNotAPicture,
     describe_frames_that_are_not_a_picture,
@@ -376,6 +377,10 @@ class AnymatixSaveAnimatedMP4:
                 except OSError:
                     pass
 
+                # The AI-generated label, in the container's own tags. The
+                # XMP half is added to the finished file before it is published.
+                ffmpeg_cmd.extend(ffmpeg_metadata_args())
+
                 ffmpeg_cmd.append(temp_file_path)
 
                 print(f"Starting FFmpeg pipe encoding with {encoder_candidate['name']}...")
@@ -537,6 +542,8 @@ class AnymatixSaveAnimatedMP4:
             _tmp_sz = os.path.getsize(temp_file_path) if _tmp_exists else 0
             _save_mp4_dbg("ATOMIC_PRE", f"temp_exists={_tmp_exists} temp_size={_tmp_sz}")
             if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
+                # Best-effort, and appended only: never fails the save.
+                mark_file(temp_file_path, container)
                 with open(temp_file_path, 'r+b') as f:
                     os.fsync(f.fileno())
 

@@ -5,6 +5,7 @@ import folder_paths
 
 from .anymatix_output_formats import AUDIO_FORMATS, audio_format
 from .anymatix_atomic_write import atomic_output
+from .anymatix_ai_disclosure import mark_bytes, set_container_tags
 
 
 class AnymatixSaveAudio:
@@ -79,6 +80,9 @@ class AnymatixSaveAudio:
                 output_container = av.open(
                     output_buffer, mode="w", format=spec["container"]
                 )
+                # The AI-generated label, in the container's own tags; the
+                # XMP half is added to the encoded bytes below.
+                set_container_tags(output_container)
 
                 layout = "mono" if waveform.shape[0] == 1 else "stereo"
                 stream_rate = spec.get("sample_rate", sample_rate)
@@ -125,6 +129,8 @@ class AnymatixSaveAudio:
                 if len(encoded) == 0:
                     print(f"Error: Audio encode for {output_file} produced no bytes")
                     return {"ui": {"audio": []}}
+                # Best-effort: the unlabelled bytes come back on any failure.
+                encoded = mark_bytes(encoded, extension)
 
                 with atomic_output(output_file, "wb") as (f, _tmp):
                     f.write(encoded)

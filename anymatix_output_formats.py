@@ -45,6 +45,7 @@ from PIL import Image
 
 try:
     from .anymatix_atomic_write import cleanup_temp, publish, temp_path_for
+    from .anymatix_ai_disclosure import mark_file
 except ImportError:
     # Loaded standalone (e.g. by tests via spec_from_file_location), with no
     # package context for a relative import to resolve against.
@@ -52,6 +53,7 @@ except ImportError:
 
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from anymatix_atomic_write import cleanup_temp, publish, temp_path_for
+    from anymatix_ai_disclosure import mark_file
 
 
 # ---------------------------------------------------------------- images ----
@@ -111,10 +113,15 @@ def write_image(
     name in the same directory and `os.replace()`d into place only once it is
     complete, so a reader polling `path` by URL never observes a half-written
     image. See `anymatix_atomic_write.py`.
+
+    The staged file is labelled as AI-generated before it is published
+    (AI Act art. 50(2); `anymatix_ai_disclosure.py`). The label is
+    best-effort: it never fails the write and never alters the pixels.
     """
     temp_path = temp_path_for(path)
     try:
         _write_image_to(temp_path, image, extension, quality, lossless_webp, bit_depth, fast)
+        mark_file(temp_path, extension)
         publish(temp_path, path)
     except BaseException:
         cleanup_temp(temp_path)

@@ -79,6 +79,9 @@ class AnymatixSaveJson:
         filename = f"{filename_prefix}.json"
         file_path = os.path.join(output_path, filename)
 
+        # Not labelled as AI-generated (`anymatix_ai_disclosure.py`): a JSON
+        # sidecar is data about a result, not image, audio or video, and
+        # AI Act art. 50(2) applies to the media only.
         try:
             with atomic_output(file_path, "w") as (f, _tmp):
                 data_to_save = to_json_serializable(json)
