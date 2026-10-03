@@ -143,6 +143,54 @@ def blur_heatmap(preds, blur):
     ).squeeze()
 
 
+def pad_convolutions_by_replication(model):
+    """Make CLIPSeg's padded convolutions continue the picture past the frame, not pad it with zeros.
+
+    The pinned `clipseg-rd64-refined` decoder ends in one 3x3
+    `nn.Conv2d(padding=1)` over its 22x22 token grid
+    (`decoder.transposed_convolution[0]`), and PyTorch pads with ZEROS unless
+    told otherwise. Every token on the border of the grid is averaged against
+    a ring of invented nothing, and the two 4x4/stride-4 transposed
+    convolutions after it turn each token into its own 16x16 block of the
+    352x352 heat map -- so the heat map sags over the outer block on every
+    side, whatever the picture shows there. Measured on the pinned weights
+    (CPU, torch 2.11, transformers 5.6), a 1024x1024 picture filled with one
+    orange, prompt "orange": 0.95 inside, and 0.08, 0.12, 0.28, 0.48, 0.62
+    over the five heat-map rows nearest the top edge. The 0.4 threshold cuts
+    the first three, so the mask of an object crossing the frame stopped short
+    of the crossed edge, up to 15 px on a 1024-px picture, and lost the corners
+    -- at Mask Blur 0 as at 6. The resize, blur, threshold and dilation after
+    the model all keep a heat map that reaches the frame on the frame (see the
+    tests); the margin was made here.
+
+    `padding_mode="replicate"` pads the grid with its own border tokens: the
+    picture continues past the frame as it is at the frame. The same five rows
+    read 0.93 each. Only the outer ring of tokens has a padded neighbour, so
+    the heat map more than 16 px inside the border is BIT-identical with and
+    without this (measured with `torch.equal` on the pumpkin the shipped card
+    bakes, and on the test pictures). Replicate, not reflect: reflect pads a
+    border token with the token inside it, and then an object ending 24 px
+    before the bottom of a 1024-px picture reached the frame; with replicate it
+    stops short, as it should. Mirroring the picture itself past the frame was
+    measured too and rejected: it reaches the frame as well, but it changes
+    the token grid, so it moves the interior (on a half-teal, half-orange
+    picture: the heat map up to 0.72 off inside, the mask's IoU against the
+    shipped one 0.80).
+
+    Returns how many convolutions it changed: 1 on the pinned weights. The
+    patch embedding is a convolution too, unpadded, and stays as it is.
+
+    See `TRACKERS/BUGS/create-mask-stops-11-15-px-short` in the app
+    repository, and `tests/test_clipseg_frame_edge.py` here.
+    """
+    import torch.nn as nn
+
+    padded = [m for m in model.modules() if isinstance(m, nn.Conv2d) and any(m.padding)]
+    for conv in padded:
+        conv.padding_mode = "replicate"
+    return len(padded)
+
+
 class AnymatixCLIPSeg:
     @classmethod
     def INPUT_TYPES(cls):
@@ -171,6 +219,7 @@ class AnymatixCLIPSeg:
         processor = CLIPSegProcessor.from_pretrained(model_dir, local_files_only=True)
         model = CLIPSegForImageSegmentation.from_pretrained(model_dir, local_files_only=True)
         model.eval()
+        pad_convolutions_by_replication(model)
 
         img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
         pil_image = Image.fromarray(img_np)
