@@ -60,6 +60,10 @@ from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
 from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
 from .host_compute_metrics import sample_host_compute_metrics
+# Whose heartbeat answered: every answer names the port this ComfyUI was
+# launched on, and a heartbeat meant for another one is never obeyed.
+from .anymatix_heartbeat_identity import heartbeat_reply, meant_for_another, side_channel_handler
+from comfy.cli_args import args as comfy_args
 
 NODE_CLASS_MAPPINGS = {
     # "AnymatixCheckpointFetcher": AnymatixCheckpointFetcher,
@@ -553,27 +557,9 @@ def _hb_watchdog() -> None:
 def _hb_serve(port: int) -> None:
     import http.server
 
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b"{}"
-                timeout = int(json.loads(raw or b"{}").get("timeout", 60))
-            except Exception:
-                timeout = 60
-            _hb_touch(timeout)
-            body = json.dumps({"status": "ok", "seconds_until_death": timeout}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self):  # noqa: N802
-            self.do_POST()
-
-        def log_message(self, *_args):
-            pass  # one line per heartbeat would bury the log it shares
+    # The handler lives in anymatix_heartbeat_identity, which says why every
+    # answer carries the port this ComfyUI was launched on.
+    Handler = side_channel_handler(_hb_touch, comfy_args.port)
 
     try:
         server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -623,6 +609,10 @@ async def serve_heartbeat(request):
     try:
         # Read timeout from request body
         data = await request.json()
+        if meant_for_another(data, comfy_args.port):
+            # Meant for another ComfyUI -- a stranger's probe, or a port that
+            # moved: answered with whose this is, never obeyed.
+            return web.json_response(heartbeat_reply(comfy_args.port, armed=False))
         timeout = data.get("timeout", 60)  # Default 60s if not specified
         _heartbeat_timeout_seconds = timeout
         print(f"anymatix: heartbeat received, timeout={timeout}s")
@@ -630,7 +620,7 @@ async def serve_heartbeat(request):
         if not _heartbeat_may_end_this_process():
             # Not a machine Anymatix started: answer, arm nothing. See
             # `_heartbeat_may_end_this_process`.
-            return web.json_response({"status": "ok", "armed": False})
+            return web.json_response(heartbeat_reply(comfy_args.port, armed=False))
 
         # Reset the watchdog timer: cancel previous timer task and create a new one
         async with _heartbeat_lock:
@@ -641,7 +631,7 @@ async def serve_heartbeat(request):
                     pass
             loop = asyncio.get_event_loop()
             _heartbeat_timer_task = loop.create_task(_heartbeat_timer(timeout))
-        return web.json_response({"status": "ok", "armed": True, "seconds_until_death": timeout})
+        return web.json_response(heartbeat_reply(comfy_args.port, armed=True, seconds_until_death=timeout))
     except Exception as e:
         print(f"anymatix: heartbeat endpoint error: {e}")
         return web.json_response({"status": "error", "error": str(e)}, status=500)
