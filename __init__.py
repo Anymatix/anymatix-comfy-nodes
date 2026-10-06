@@ -47,7 +47,7 @@ from .anymatix_checkpoint_fetcher import (
     AnymatixSeedVR2LoadVAEModel,
 )
 # The referrer rule both deletion paths obey, defined once in fetch.py.
-from .fetch import model_file_is_spoken_for, sidecar_url_matches
+from .fetch import model_file_is_spoken_for, read_sidecar, sidecar_url_matches
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
@@ -1172,10 +1172,9 @@ async def serve_delete(request):
                 norm_path = os.path.normcase(os.path.abspath(json_path))
                 if norm_path in seen_sidecars:
                     continue
-                try:
-                    with open(json_path, "r") as f:
-                        sidecar = json.load(f)
-                except Exception:
+                # A scan for the url's sidecars reads every sibling: keep their atime.
+                sidecar = read_sidecar(json_path)
+                if sidecar is None:
                     continue
                 if not isinstance(sidecar, dict):
                     continue
@@ -1385,8 +1384,15 @@ async def serve_resources(_request):
             print(f"[anymatix resources] error listing models_dir: {e}")
 
     def get_json_data(path: str) -> dict:
-        with open(path, "r") as f:
-            return json.load(f)
+        # LISTING IS NOT USING. The app calls this endpoint after runs and on
+        # connect; a plain read here persisted atime=now on every sidecar of a
+        # RunPod volume (MooseFS keeps a read's atime when atime <= ctime, and
+        # every atime restore moves ctime), so the auto-clean saw every weight
+        # as used today and never evicted. read_sidecar puts atime back.
+        data = read_sidecar(path)
+        if data is None:
+            raise ValueError("unreadable sidecar")
+        return data
 
     def get_type(path: str) -> str:
         abs_path = os.path.abspath(path)

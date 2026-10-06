@@ -27,6 +27,7 @@ try:
         hash_string,
         is_under_nvme_cache,
         pick_durable_dir,
+        read_sidecar,
         satisfied_locally,
     )
 except Exception:
@@ -38,6 +39,7 @@ except Exception:
             hash_string,
             is_under_nvme_cache,
             pick_durable_dir,
+            read_sidecar,
             satisfied_locally,
         )
     except Exception:
@@ -476,12 +478,11 @@ def _sidecars_for_model(dir_path: str, model_basename: str) -> list:
         for item in os.listdir(dir_path):
             if not item.endswith(".json"):
                 continue
-            try:
-                with open(os.path.join(dir_path, item)) as f:
-                    if json.load(f).get("file_name") == model_basename:
-                        out.append(item)
-            except Exception:
-                pass
+            # A scan of siblings, not a use: read_sidecar keeps their atime,
+            # the "last used" signal the RunPod volume auto-clean evicts by.
+            data = read_sidecar(os.path.join(dir_path, item))
+            if data is not None and data.get("file_name") == model_basename:
+                out.append(item)
     except OSError:
         pass
     return out
@@ -616,11 +617,10 @@ def _reconcile_nvme_cache_to_volume() -> None:
                 continue
             if os.path.isfile(os.path.join(durable_dir, item)):
                 continue
-            try:
-                with open(os.path.join(cache_dir, item)) as f:
-                    model_basename = json.load(f).get("file_name") or ""
-            except Exception:
+            data = read_sidecar(os.path.join(cache_dir, item))
+            if data is None:
                 continue
+            model_basename = data.get("file_name") or ""
             if model_basename and os.path.isfile(os.path.join(cache_dir, model_basename)):
                 print(f"[ANYMATIX] reconciling un-mirrored cache download: {model_basename}")
                 _mirror_cache_entry_to_volume(cache_dir, durable_dir, model_basename)
@@ -1546,8 +1546,8 @@ class AnymatixFetcher:
                     for item in os.listdir(dir):
                         if item.endswith(".json"):
                             try:
-                                with open(os.path.join(dir, item), 'r') as sidecar_f:
-                                    sidecar_data = json.load(sidecar_f)
+                                # A scan for a twin, not a use: keep the atime.
+                                sidecar_data = read_sidecar(os.path.join(dir, item)) or {}
                                 if sidecar_data.get("sha256") == target_hash:
                                     other_file_name = sidecar_data.get("file_name")
                                     if other_file_name:
