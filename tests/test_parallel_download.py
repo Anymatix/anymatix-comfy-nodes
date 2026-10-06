@@ -32,6 +32,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import fetch as F  # noqa: E402
 
 
+# THESE TESTS ARE ABOUT THE ASYNC DOWNLOADER, AND WITHOUT aiohttp + aiofiles
+# `fetch_parallel` silently takes the THREADED strategy instead: it buffers the
+# segments in RAM (test_streams_to_disk then reads +1.1 GB for 128 MB) and
+# retries failed segments in place (so the salvage test never sees a failure).
+# Both went red on a plain `pip install pytest` Python and read as a downloader
+# defect; neither was. Say what is missing instead of failing on a symptom.
+if not (F.AIOHTTP_AVAILABLE and F.AIOFILES_AVAILABLE):
+    _why = "needs aiohttp and aiofiles (the ComfyUI venv has them): the async downloader is not what would run"
+    try:
+        import pytest
+        pytest.skip(_why, allow_module_level=True)
+    except ImportError:
+        raise SystemExit(_why)
+
+
 def serve(blob, refuse_late_ranges=0):
     """A Range-capable server. Slices are sent from a memoryview so the SERVER
     never shows up in the memory measurement."""
