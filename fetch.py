@@ -333,7 +333,8 @@ def adoption_candidates(dirs, canonical_name: str, sha256: str, self_sidecar: st
         if expected_size is None:
             continue
         for item in entries:
-            if item.endswith(".json") or item.endswith(".part") or item.endswith(".complete"):
+            if item.endswith(".json") or item.endswith(".part") or item.endswith(".complete") \
+                    or item.endswith(".segments") or item.endswith(".segments.tmp"):
                 continue
             if ext and not item.endswith(ext):
                 continue
@@ -890,7 +891,8 @@ class SegmentDownloader:
 
 async def fetch_async_segment(session, url: str, start: int, end: int,
                             segment_id: int, progress_callback: Optional[Callable] = None,
-                            part_path: Optional[str] = None) -> int:
+                            part_path: Optional[str] = None,
+                            on_landed: Optional[Callable[[int, int], None]] = None) -> int:
     """
     Download one byte range STRAIGHT TO ITS OFFSET in the part file.
 
@@ -902,6 +904,12 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
     to make a shared machine swap. Each task opens its own handle: POSIX is
     happy with concurrent writes to disjoint ranges, so no lock is needed and
     the peak is one chunk per connection.
+
+    `on_landed(segment_id, offset)` is told, every `SEGMENT_JOURNAL_STRIDE`
+    bytes and at the end, the absolute offset up to which this segment's bytes
+    have been handed to the kernel — flushed, so a process that dies the next
+    instant has not lost them. That is what `SegmentJournal` records, and the
+    only thing that lets a killed download resume (see there).
     """
     if not AIOHTTP_AVAILABLE:
         raise ImportError("aiohttp not available")
@@ -918,10 +926,21 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
 
         async with aiofiles.open(part_path, 'r+b') as f:
             await f.seek(start)
+            position = start
+            unrecorded = 0
             async for chunk in response.content.iter_chunked(8192):
                 await f.write(chunk)
+                position += len(chunk)
+                unrecorded += len(chunk)
                 if progress_callback:
                     progress_callback(len(chunk))
+                if on_landed and unrecorded >= SEGMENT_JOURNAL_STRIDE:
+                    await f.flush()
+                    on_landed(segment_id, position)
+                    unrecorded = 0
+            await f.flush()
+            if on_landed:
+                on_landed(segment_id, position)
 
         return segment_id
 
@@ -964,8 +983,11 @@ class AsyncParallelDownloader:
                 except:
                     progress_bar = None
             
-            # Calculate segments
-            segment_size = max(1024*1024, self.total_size // self.max_connections)  # At least 1MB per segment
+            # Calculate segments. A journal left by a download that was killed
+            # fixes the layout: its offsets only mean something in its own.
+            journal = read_segment_journal(self.file_path, self.total_size)
+            segment_size = journal["segment_size"] if journal else \
+                max(1024*1024, self.total_size // self.max_connections)  # At least 1MB per segment
             segments = []
             
             for i in range(0, self.total_size, segment_size):
@@ -1032,18 +1054,33 @@ class AsyncParallelDownloader:
                 # `bugs/the-parallel-download-writes-part-part-can`.
                 part_path = self.file_path
                 os.makedirs(os.path.dirname(part_path) or ".", exist_ok=True)
-                # THE MOMENT THIS RUNS, THE FILE IS THE RIGHT SIZE AND EMPTY.
-                # Any completion recorded for an earlier part file at this path
-                # describes bytes that no longer exist, so it goes first: a
-                # marker that survives its own bytes is how a hole gets adopted.
-                clear_part_completion(part_path)
-                async with aiofiles.open(part_path, 'wb') as prealloc:
-                    await prealloc.truncate(self.total_size)
+                if journal:
+                    # A KILLED DOWNLOAD, CARRIED ON — NOT HASHED, NOT RESTARTED.
+                    # `bugs/a-dropped-ssh-link-remote-machine-kills`: see
+                    # `SegmentJournal`. The part file is kept as it is; each
+                    # segment carries on from the offset it had flushed.
+                    landed = journal["done"]
+                    already = sum(min(landed.get(i, 0), e - s + 1) for i, s, e in segments)
+                    print(f"[ANYMATIX DOWNLOAD] Resuming a parallel download that was interrupted: "
+                          f"{already} of {self.total_size} bytes are already on disk")
+                    progress_update(already)
+                else:
+                    # THE MOMENT THIS RUNS, THE FILE IS THE RIGHT SIZE AND EMPTY.
+                    # Any completion recorded for an earlier part file at this path
+                    # describes bytes that no longer exist, so it goes first: a
+                    # marker that survives its own bytes is how a hole gets adopted.
+                    clear_part_completion(part_path)
+                    async with aiofiles.open(part_path, 'wb') as prealloc:
+                        await prealloc.truncate(self.total_size)
+                    landed = {}
+                record = SegmentJournal(part_path, self.total_size, segment_size, segments, landed)
 
-                # Download all segments concurrently
+                # Download all segments concurrently — what is left of each.
                 tasks = [
-                    fetch_async_segment(session, self.url, start, end, seg_id, progress_update, part_path)
+                    fetch_async_segment(session, self.url, start + landed.get(seg_id, 0), end, seg_id,
+                                        progress_update, part_path, on_landed=record.landed)
                     for seg_id, start, end in segments
+                    if start + landed.get(seg_id, 0) <= end
                 ]
                 
                 segment_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1060,10 +1097,9 @@ class AsyncParallelDownloader:
                     # 18% already done, instead of starting from zero on every
                     # retry (which is what a downloader that only wrote at the
                     # end could never avoid).
-                    completed = {
-                        idx for idx, r in enumerate(segment_results)
-                        if not isinstance(r, BaseException)
-                    }
+                    # By what LANDED, not by task index: segments a resumed
+                    # download found already whole have no task at all.
+                    completed = set(record.finished)
                     prefix = 0
                     for seg_id, seg_start, seg_end in segments:
                         if seg_id not in completed:
@@ -1081,6 +1117,10 @@ class AsyncParallelDownloader:
                             # It is not: it is what we just truncated on
                             # purpose.
                             self.kept_prefix = prefix
+                            # A prefix is resumed by ONE stream; the journal's
+                            # per-segment offsets describe a file that no longer
+                            # exists at this length.
+                            clear_segment_journal(part_path)
                             # No rename: `part_path` IS `self.file_path` (the
                             # caller's part file). `os.replace` here was a
                             # no-op that read like a move, which is how the
@@ -1117,6 +1157,7 @@ class AsyncParallelDownloader:
                 # process. Until 2026-09-17 it was printed and forgotten, and
                 # the next run had nothing but the size to go on.
                 mark_part_complete(part_path, self.total_size)
+                clear_segment_journal(part_path)
 
                 if progress_bar:
                     progress_bar.close()
@@ -1543,6 +1584,101 @@ def clear_part_completion(part_path: str) -> None:
         os.remove(completion_marker_for(part_path))
     except OSError:
         pass
+    # The same goes for how far each segment got.
+    clear_segment_journal(part_path)
+
+
+# How often a segment writer flushes and records how far it got. Small enough
+# that a kill costs little (8 segments x 32 MB, at most, re-fetched), large
+# enough that the journal is rewritten a few times a second at most.
+SEGMENT_JOURNAL_STRIDE = 32 * 1024 * 1024
+
+
+def segment_journal_for(part_path: str) -> str:
+    """Where a parallel download records how far each of its segments got."""
+    return part_path + ".segments"
+
+
+def clear_segment_journal(part_path: str) -> None:
+    try:
+        os.remove(segment_journal_for(part_path))
+    except OSError:
+        pass
+
+
+def read_segment_journal(part_path: str, total_size) -> Optional[dict]:
+    """The journal of an interrupted parallel download of THIS part file, if
+    it can be trusted: same declared size, a part file of that size beside it.
+    Anything else is None, and the download starts from zero as it always did."""
+    data = read_sidecar(segment_journal_for(part_path))
+    if not data or total_size is None:
+        return None
+    try:
+        if int(data.get("size", -1)) != int(total_size):
+            return None
+        segment_size = int(data["segment_size"])
+        done = {int(k): int(v) for k, v in (data.get("done") or {}).items()}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if segment_size <= 0 or any(v < 0 for v in done.values()):
+        return None
+    try:
+        if os.path.getsize(part_path) != int(total_size):
+            return None
+    except OSError:
+        return None
+    return {"segment_size": segment_size, "done": done}
+
+
+class SegmentJournal:
+    """HOW FAR EACH SEGMENT GOT, WRITTEN WHERE THE NEXT PROCESS CAN READ IT.
+
+    `bugs/a-dropped-ssh-link-remote-machine-kills`. A parallel download writes
+    eight segments at their offsets into a pre-allocated part file and, until
+    this, recorded nothing until every one of them had finished. A process that
+    died mid-way — the remote's dead-man switch after a long link outage, a
+    Stop, an OOM — left a full-length file with holes and no record of where
+    they were, so the next run could only hash it (minutes for 12 GB on a
+    rotational disk), find it wrong, and fetch every byte again. Measured on
+    pc-ciancia, 2026-10-06: `flux1-dev-kontext_fp8_scaled`, 11.9 GB at
+    ~12 MB/s, restarted from `0.00/11.9G` after the switch fired at 19:03:05Z.
+
+    Each segment is written IN ORDER from its start, so how far it got is one
+    number. The writer flushes before reporting it, so the bytes below the
+    recorded offset are in the kernel even if the process dies the next
+    instant; the journal is replaced atomically, so it is never half-written.
+    """
+
+    def __init__(self, part_path: str, total_size: int, segment_size: int,
+                 segments, landed: dict):
+        self.part_path = part_path
+        self.total_size = total_size
+        self.segment_size = segment_size
+        self.starts = {sid: s for sid, s, e in segments}
+        self.lengths = {sid: e - s + 1 for sid, s, e in segments}
+        self.done = {sid: min(landed.get(sid, 0), self.lengths[sid]) for sid in self.starts}
+        self.finished = {sid for sid in self.starts if self.done[sid] >= self.lengths[sid]}
+        self._write()
+
+    def landed(self, segment_id: int, offset: int) -> None:
+        self.done[segment_id] = max(self.done.get(segment_id, 0), offset - self.starts[segment_id])
+        if self.done[segment_id] >= self.lengths[segment_id]:
+            self.finished.add(segment_id)
+        self._write()
+
+    def _write(self) -> None:
+        path = segment_journal_for(self.part_path)
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"size": self.total_size, "segment_size": self.segment_size,
+                           "done": {str(k): v for k, v in self.done.items()}}, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            # A journal we could not write costs a restart from zero — what
+            # happened before it existed. Worth a line, not a failed download.
+            print(f"[ANYMATIX DOWNLOAD] Could not record segment progress for "
+                  f"{os.path.basename(self.part_path)}: {e}")
 
 
 def part_completion_is_recorded(part_path: str, expected_size) -> bool:
@@ -1950,7 +2086,18 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     # killed at 1% leaves a file of exactly the right size.
                     # Every large model takes the parallel path.
                     # bugs/a-parallel-download-pre-allocates-part-file-so
-                    if resumed_part_is_the_whole_file(
+                    #
+                    # UNLESS IT CARRIES A JOURNAL: then it is a parallel
+                    # download that was killed, and the journal says exactly
+                    # which bytes landed (`SegmentJournal`). It is neither
+                    # hashed nor discarded; the parallel path below carries on
+                    # each segment from where it stopped.
+                    if not part_completion_is_recorded(part_file, data["file_size"]) \
+                            and read_segment_journal(part_file, data["file_size"]) is not None:
+                        print(f"[ANYMATIX DOWNLOAD] {data['file_name']}: an interrupted parallel "
+                              f"download is on disk with its segment journal - resuming it")
+                        local_file_size = 0
+                    elif resumed_part_is_the_whole_file(
                         part_file, data["file_size"], remote_stated_sha256,
                         data["file_name"], progress=verifying
                     ):
@@ -1958,15 +2105,16 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                             part_file, file_path, data["file_size"], data["file_name"]
                         )
                         return finish_download()
-                    # Unprovable, and there is no prefix to salvage: the holes
-                    # of a dead parallel download are wherever its segments were
-                    # not, so the only honest offset to resume from is zero.
-                    try:
-                        os.remove(part_file)
-                    except Exception:
-                        pass
-                    clear_part_completion(part_file)
-                    local_file_size = 0
+                    else:
+                        # Unprovable, and there is no prefix to salvage: the holes
+                        # of a dead parallel download are wherever its segments were
+                        # not, so the only honest offset to resume from is zero.
+                        try:
+                            os.remove(part_file)
+                        except Exception:
+                            pass
+                        clear_part_completion(part_file)
+                        local_file_size = 0
                 if local_file_size > data["file_size"]:
                     # Self-heal: a partial larger than the target is corrupt — almost
                     # always a prior resume where the server ignored our Range header and
@@ -2105,6 +2253,24 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             #
             # Same family as the `.part.part` bug fixed in 4383c3da: one path
             # built twice, one step further down the same road.
+            # A JOURNALED PART FILE IS NOT A PREFIX. It is full-length with
+            # holes, and appending to it from its size would corrupt it. If the
+            # parallel attempt failed before it could carry on, the journal is
+            # kept for the next run and this one says why; if the server simply
+            # does not do ranges, nothing can resume it and it goes.
+            if read_segment_journal(part_file, data["file_size"]) is not None:
+                if parallel_exception is not None:
+                    raise Exception(
+                        f"Download of {data['file_name']} interrupted; the bytes already on disk "
+                        f"are kept and resume next time: {parallel_exception}"
+                    ) from parallel_exception
+                try:
+                    os.remove(part_file)
+                except OSError:
+                    pass
+                clear_part_completion(part_file)
+                local_file_size = 0
+                downloaded_size = 0
             if os.path.exists(part_file):
                 salvaged = os.path.getsize(part_file)
                 if salvaged > local_file_size:
