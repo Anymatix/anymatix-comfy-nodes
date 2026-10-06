@@ -321,13 +321,9 @@ def adoption_candidates(dirs, canonical_name: str, sha256: str, self_sidecar: st
         for item in entries:
             if not item.endswith(".json") or item == self_sidecar:
                 continue
-            try:
-                with open(os.path.join(d, item), "r") as f:
-                    other = json.load(f)
-            except (OSError, ValueError):
-                # A sidecar we cannot read is a sidecar with nothing to say
-                # about this file. It is not this function's job to repair it.
-                continue
+            # A sidecar we cannot read is a sidecar with nothing to say
+            # about this file. It is not this function's job to repair it.
+            other = read_sidecar(os.path.join(d, item))
             if isinstance(other, dict) and str(other.get("sha256", "")).lower() == sha256:
                 name = other.get("file_name")
                 if name:
@@ -1317,11 +1313,25 @@ def sidecar_url_matches(stored_url, url: str) -> bool:
 
 
 def read_sidecar(path: str) -> Optional[dict]:
+    """The sidecar at `path`, if it is one. Leaves its access time alone.
+
+    A sidecar's atime is the one honest "a card last asked for this model"
+    signal a RunPod volume keeps (bootstrap.py's volume auto-clean reads it).
+    Every caller of this function is SCANNING -- looking at a sidecar that
+    belongs to some url other than the one being served -- and a scan that
+    updates atime marks every sibling as just used, so nothing is ever old
+    enough to evict. Only `fetch_model`'s own `open(store_path)` is a use.
+    """
     try:
+        st = os.stat(path)
         with open(path, "r") as contents:
             data = json.load(contents)
     except (OSError, ValueError):
         return None
+    try:
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    except OSError:
+        pass
     return data if isinstance(data, dict) else None
 
 
