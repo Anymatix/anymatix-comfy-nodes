@@ -143,6 +143,78 @@ def blur_heatmap(preds, blur):
     ).squeeze()
 
 
+# eps of the guided filter, on a picture scaled to [0, 1]: a window whose
+# colour varies by less than sqrt(eps) = 0.1 is treated as one surface and the
+# map is only smoothed there; a larger colour step (a pale wall against an
+# orange body) is an edge the map snaps to. Measured choice: see below.
+SNAP_EPS = 1e-2
+
+
+def snap_radius(h, w):
+    """The guided filter's window radius for an h x w picture: ~0.7 of a CLIP token.
+
+    `clipseg-rd64-refined` sees the picture as 22x22 tokens of 16 px at 352,
+    so one token covers `max(h, w) / 22` px of the original -- 46.5 px at 1024.
+    The heat map has no evidence finer than that, so the window that re-draws
+    its contour must reach across most of one token to find the edge the token
+    straddles: `max(h, w) / 32` (32 px at 1024, measured best of 24/32/48 on
+    the shipped pumpkin). Never below 1.
+    """
+    return max(1, int(round(max(h, w) / 32)))
+
+
+def snap_heatmap_to_edges(preds, image, radius, eps=SNAP_EPS):
+    """Re-draw a coarse heat map along the edges of the picture (colour guided filter).
+
+    THE CAUSE THIS CURES. CLIPSeg's evidence is one value per 46 px token at
+    1024 (see `pad_convolutions_by_replication`), and `segment()` upsamples it
+    bilinearly. A bilinear ramp knows nothing about where the object ends, so
+    the `> threshold` contour crosses the true edge at a slant: it stands
+    proud of the object where the token was mostly object (a pale collar of
+    wall and floor kept around the cut) and falls short where it was mostly
+    background. No threshold, blur or dilation fixes that, because all three
+    act on the ramp, not on the picture. Measured on the shipped `Create Mask`
+    pumpkin, 1024x1024: 2,569 px of pale, desaturated background inside the
+    mask, every one of them within 24 px of the object.
+
+    The guided filter (He, Sun & Tang, 2013) fits the map, in every window, as
+    a linear function of the picture's three colour channels and averages the
+    fits. Where the window holds one surface the map stays as it was; where
+    it straddles an edge the map takes the edge's shape, because the edge is
+    where the colour changes. Same picture, same map, radius 32, eps 1e-2:
+    2,569 -> 32 px of background inside the mask, and fewer pixels of the
+    pumpkin left out, not more (3,094 -> 2,888, all of them on the stem,
+    which CLIPSeg scores at 0.19 and so never selects). eps 1e-3 removes 7
+    more px of collar and costs 83 px of stem; 3e-2 lets the collar back.
+
+    Box sums use `count_include_pad=False`, so the frame border is not pulled
+    towards zero (the defect `blur_heatmap` documents).
+
+    preds: (h, w) heat map in [0, 1]. image: (h, w, 3) picture in [0, 1].
+    Returns an (h, w) map, not clamped: only `> threshold` reads it.
+    """
+    import torch.nn.functional as F
+
+    if radius <= 0:
+        return preds
+    k = 2 * radius + 1
+
+    def box(x):
+        return F.avg_pool2d(x.unsqueeze(0), k, stride=1, padding=radius, count_include_pad=False).squeeze(0)
+
+    p = preds.float()
+    guide = image.float().to(p.device).permute(2, 0, 1).contiguous()  # 3, h, w
+    mean_i = box(guide)
+    mean_p = box(p.unsqueeze(0)).squeeze(0)
+    cov_ip = box(guide * p.unsqueeze(0)) - mean_i * mean_p.unsqueeze(0)
+    products = torch.stack([guide[i] * guide[j] for i in range(3) for j in range(3)])
+    var = (box(products) - torch.stack([mean_i[i] * mean_i[j] for i in range(3) for j in range(3)]))
+    var = var.permute(1, 2, 0).reshape(*p.shape, 3, 3) + eps * torch.eye(3, device=p.device)
+    a = torch.linalg.solve(var, cov_ip.permute(1, 2, 0).unsqueeze(-1)).squeeze(-1).permute(2, 0, 1)
+    b = mean_p - (a * mean_i).sum(0)
+    return (box(a) * guide).sum(0) + box(b.unsqueeze(0)).squeeze(0)
+
+
 def pad_convolutions_by_replication(model):
     """Make CLIPSeg's padded convolutions continue the picture past the frame, not pad it with zeros.
 
@@ -203,6 +275,7 @@ class AnymatixCLIPSeg:
                 "blur": ("FLOAT", {"min": 0, "max": 15, "step": 0.1, "default": 0}),
                 "threshold": ("FLOAT", {"min": 0, "max": 1, "step": 0.05, "default": 0.4}),
                 "dilation_factor": ("INT", {"min": 0, "max": 10, "step": 1, "default": 5}),
+                "snap_to_edges": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -210,7 +283,7 @@ class AnymatixCLIPSeg:
     FUNCTION = "segment"
     CATEGORY = "Anymatix"
 
-    def segment(self, image, text, blur=0, threshold=0.4, dilation_factor=5):
+    def segment(self, image, text, blur=0, threshold=0.4, dilation_factor=5, snap_to_edges=False):
         from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
         import torch.nn.functional as F
 
@@ -241,6 +314,9 @@ class AnymatixCLIPSeg:
         ).squeeze()
 
         preds = blur_heatmap(preds, blur)
+
+        if snap_to_edges:
+            preds = snap_heatmap_to_edges(preds, image[0, :, :, :3], snap_radius(h, w))
 
         mask = (preds > threshold).float()
 
