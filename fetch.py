@@ -676,8 +676,7 @@ class SegmentDownloader:
             try:
                 headers = {'Range': f'bytes={start}-{end}'}
                 with requests.get(self.url, headers=headers, stream=True, timeout=30) as response:
-                    if response.status_code not in [206, 200]:  # Partial Content or OK
-                        raise Exception(f"HTTP {response.status_code}")
+                    check_range_response(response.status_code, response.headers.get('Content-Range'), start, end)
                         
                     segment_data = b''
                     for chunk in response.iter_content(chunk_size=8192):
@@ -702,6 +701,11 @@ class SegmentDownloader:
                                     active_segments = len([s for s in self.active_segments.keys()])
                                     print(f"[ANYMATIX PARALLEL] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%) - {active_segments} segments active")
                     
+                    if len(segment_data) != end - start + 1:
+                        raise RangeNotHonoured(
+                            f"segment {segment_id} received {len(segment_data)} of its {end - start + 1} bytes"
+                        )
+
                     # Write segment to temp file
                     temp_path = f"{self.file_path}.segment_{segment_id}"
                     with open(temp_path, 'wb') as f:
@@ -889,6 +893,35 @@ class SegmentDownloader:
             raise Exception(f"Failed to assemble downloaded file: {e}") from e
 
 
+class RangeNotHonoured(Exception):
+    """The server answered a range request with something other than that range."""
+
+
+def check_range_response(status: int, content_range: Optional[str], start: int, end: int) -> None:
+    """
+    A RANGE REQUEST IS ANSWERED BY THAT RANGE, OR NOT AT ALL.
+
+    `200` used to be accepted beside `206`. A `200` is the server IGNORING the
+    range and sending the whole file, and the segment loop wrote every byte of
+    it from `start` on: on fmt-5000, 2026-10-07, a Civitai LTX 2.3 VAE part file
+    grew to 2,722,984,832 of its 1,452,258,578 bytes
+    (`bugs/a-parallel-segment-download-accepts-http-200`). Only a `206` whose
+    `Content-Range` starts at `start` is this segment; anything else raises,
+    the parallel strategy fails, and the downloader falls back to one stream,
+    which knows what to do with a `200`.
+    """
+    if status != 206:
+        raise RangeNotHonoured(f"HTTP {status} to Range bytes={start}-{end}")
+    if content_range:
+        try:
+            unit, _, rest = content_range.strip().partition(" ")
+            first = int(rest.split("-", 1)[0])
+        except (ValueError, IndexError):
+            raise RangeNotHonoured(f"unreadable Content-Range {content_range!r} for bytes={start}-{end}")
+        if unit.lower() != "bytes" or first != start:
+            raise RangeNotHonoured(f"Content-Range {content_range!r} does not start at {start}")
+
+
 async def fetch_async_segment(session, url: str, start: int, end: int,
                             segment_id: int, progress_callback: Optional[Callable] = None,
                             part_path: Optional[str] = None,
@@ -921,14 +954,17 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
     headers = {'Range': f'bytes={start}-{end}'}
 
     async with session.get(url, headers=headers) as response:
-        if response.status not in [206, 200]:
-            raise Exception(f"HTTP {response.status}")
+        check_range_response(response.status, response.headers.get('Content-Range'), start, end)
 
         async with aiofiles.open(part_path, 'r+b') as f:
             await f.seek(start)
             position = start
             unrecorded = 0
             async for chunk in response.content.iter_chunked(8192):
+                if position + len(chunk) > end + 1:
+                    raise RangeNotHonoured(
+                        f"segment {segment_id} received more than its {end - start + 1} bytes"
+                    )
                 await f.write(chunk)
                 position += len(chunk)
                 unrecorded += len(chunk)
