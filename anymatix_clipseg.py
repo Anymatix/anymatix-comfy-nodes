@@ -1,4 +1,7 @@
+import json
 import os
+import struct
+import zipfile
 import torch
 import numpy as np
 from PIL import Image
@@ -44,8 +47,61 @@ def get_clipseg_model_dir() -> str:
     return model_dir
 
 
+def _is_complete_file(path: str) -> bool:
+    """
+    Is `path` a whole file of its kind, not a stub an interrupted run left?
+
+    The download used to write the final name directly, so a stopped run left a
+    truncated `model.safetensors` that `os.path.exists` then vouched for forever
+    (bugs/create-mask-s-clipseg-fetch-writes-model). A finished file is told from
+    a cut one by its own structure: json parses, a safetensors header's declared
+    extent equals the file size, a torch `.bin` is a readable zip.
+    """
+    try:
+        size = os.path.getsize(path)
+        if size == 0:
+            return False
+        if path.endswith(".json"):
+            with open(path, "rb") as f:
+                json.loads(f.read().decode("utf-8"))
+            return True
+        if path.endswith(".safetensors"):
+            with open(path, "rb") as f:
+                head = f.read(8)
+                if len(head) < 8:
+                    return False
+                n = struct.unpack("<Q", head)[0]
+                if n > size - 8:
+                    return False
+                header = json.loads(f.read(n).decode("utf-8"))
+            end = 0
+            for k, v in header.items():
+                if k != "__metadata__":
+                    end = max(end, v["data_offsets"][1])
+            return 8 + n + end == size
+        if path.endswith(".bin"):
+            return zipfile.is_zipfile(path)
+        return True
+    except Exception:
+        return False
+
+
+def _discard_if_truncated(path: str) -> None:
+    """Delete an existing file that fails `_is_complete_file`, so it is fetched again."""
+    if os.path.exists(path) and not _is_complete_file(path):
+        print(f"[AnymatixCLIPSeg] {os.path.basename(path)} is truncated, fetching it again")
+        os.remove(path)
+
+
 def _download_to_path(url: str, dest_path: str) -> None:
-    """Download url to dest_path using requests. Raises on HTTP error."""
+    """
+    Download url to dest_path. Raises on HTTP error or a short transfer.
+
+    Bytes accumulate in `<dest>.part` and only a transfer that matches the
+    declared Content-Length is renamed (atomically) to `dest_path`, the same
+    rule as fetch.part_path_for / finalize_download: a download in progress
+    must not wear the name of a finished one.
+    """
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library is required for downloading CLIPSeg model files")
     import comfy.utils
@@ -54,19 +110,36 @@ def _download_to_path(url: str, dest_path: str) -> None:
     response.raise_for_status()
     total = int(response.headers.get("content-length", 0))
     downloaded = 0
-    with open(dest_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total > 0:
-                    pbar.update_absolute(round(1000 * downloaded / total), 1000)
+    part = dest_path + ".part"
+    try:
+        with open(part, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pbar.update_absolute(round(1000 * downloaded / total), 1000)
+            f.flush()
+            os.fsync(f.fileno())
+        if total > 0 and downloaded != total:
+            raise IOError(f"Incomplete download of {os.path.basename(dest_path)}: {downloaded} of {total} bytes")
+    except BaseException:
+        # Interrupted or short: the bytes were never a model; leave nothing behind.
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    os.replace(part, dest_path)
     pbar.update_absolute(1000, 1000)
 
 
 def ensure_clipseg_model() -> str:
     """Download all CLIPSeg model files to the Anymatix models directory if not present."""
     model_dir = get_clipseg_model_dir()
+
+    for filename in CLIPSEG_CONFIG_FILES + CLIPSEG_WEIGHT_FILES:
+        _discard_if_truncated(os.path.join(model_dir, filename))
 
     for filename in CLIPSEG_CONFIG_FILES:
         dest = os.path.join(model_dir, filename)
