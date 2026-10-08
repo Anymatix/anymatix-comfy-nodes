@@ -1904,6 +1904,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             print("loading json", store_path)
             with open(store_path, 'r') as contents:
                 data.update(json.load(contents))
+            # A sidecar with no `file_size` is one whose server stated no
+            # length (`remembered_size`, `satisfied_by_sidecar`). Sidecars
+            # written before the key existed omit it rather than storing None,
+            # and every read below indexes it: say it once, here.
+            data.setdefault("file_size", None)
         else:
             print("fetching headers", redact_url(effective, redact_append))
             data.update(fetch_headers(effective, session))
