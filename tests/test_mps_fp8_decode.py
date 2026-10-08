@@ -48,6 +48,21 @@ def test_dequantize_matches_the_eager_formula_on_cpu():
     assert torch.equal(got, expected)
 
 
+@pytest.mark.parametrize("fp8", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_encode_paths_match_the_eager_backend_on_cpu(fp8):
+    eager = pytest.importorskip("comfy_kitchen.backends.eager.quantization")
+    torch.manual_seed(0)
+    x = torch.randn(256, 64, dtype=torch.bfloat16) * 3
+    rng = torch.randint(0, 256, x.shape, dtype=torch.uint8)
+    got = M.stochastic_rounding_fp8(x.clone(), rng, fp8)
+    want = eager.stochastic_rounding_fp8(x.clone(), rng, fp8)
+    assert got.dtype == fp8 and torch.equal(got.view(torch.uint8), want.view(torch.uint8))
+    scale = torch.tensor(0.05, dtype=torch.float32)
+    got = M.quantize_per_tensor_fp8(x.float(), scale, fp8)
+    want = eager.quantize_per_tensor_fp8(x.float(), scale, fp8)
+    assert torch.equal(got.view(torch.uint8), want.view(torch.uint8))
+
+
 class _Registry:
     def __init__(self):
         self._priority = ["cuda", "triton", "eager"]
@@ -67,8 +82,10 @@ def test_registers_first_on_a_mac_and_only_on_mps():
     assert reg._priority == ["anymatix_mps", "cuda", "triton", "eager"]
     module, caps = reg.registered["anymatix_mps"]
     assert module.dequantize_per_tensor_fp8 is M.dequantize_per_tensor_fp8
-    assert set(caps) == {"dequantize_per_tensor_fp8"}
-    assert caps["dequantize_per_tensor_fp8"].default_devices == frozenset({"mps"})
+    assert set(caps) == {"dequantize_per_tensor_fp8", "quantize_per_tensor_fp8", "stochastic_rounding_fp8"}
+    for name in caps:
+        assert caps[name].default_devices == frozenset({"mps"})
+        assert getattr(module, name) is getattr(M, name)
     # registering twice does not stack the name
     M.register(registry=reg, mps_available=True)
     assert reg._priority.count("anymatix_mps") == 1
@@ -96,3 +113,17 @@ def test_comfy_kitchen_dequantizes_on_mps_once_registered():
     got = ck.dequantize_per_tensor_fp8(x_cpu.to("mps"), scale.to("mps"), torch.bfloat16)
     assert got.device.type == "mps"
     assert torch.equal(got.cpu(), x_cpu.to(torch.bfloat16) * scale.to(torch.bfloat16))
+
+
+@pytest.mark.skipif(not MPS, reason="needs Apple Silicon")
+def test_a_lora_patch_requantizes_on_mps_once_registered():
+    """Krea 2 Image to Image's Style LoRA failed here, in the encode direction."""
+    ck = pytest.importorskip("comfy_kitchen")
+    eager = pytest.importorskip("comfy_kitchen.backends.eager.quantization")
+    assert M.register() is True
+    x = torch.randn(128, 64, dtype=torch.bfloat16)
+    rng = torch.randint(0, 256, x.shape, dtype=torch.uint8)
+    got = ck.stochastic_rounding_fp8(x.to("mps"), rng.to("mps"), torch.float8_e4m3fn)
+    assert got.device.type == "mps" and got.dtype == torch.float8_e4m3fn
+    want = eager.stochastic_rounding_fp8(x, rng, torch.float8_e4m3fn)
+    assert torch.equal(got.cpu().view(torch.uint8), want.view(torch.uint8))

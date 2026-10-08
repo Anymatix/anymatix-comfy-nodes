@@ -15,6 +15,12 @@ so that cast is what raises. ComfyUI's own `supports_cast` already knows MPS
 cannot cast fp8 -- which is why a plain fp8 checkpoint is upcast at load and
 runs -- but the mixed-precision path never asks it.
 
+The same cast sits at the end of the two ENCODE paths, `quantize_per_tensor_fp8`
+and `stochastic_rounding_fp8`, which ComfyUI calls when it patches an fp8
+weight (a Style LoRA on Krea 2 Image to Image failed there, after the decode
+was fixed). Those are re-implemented with the eager arithmetic on the device
+and the final cast done on the CPU.
+
 The fix keeps the weights in fp8 on the GPU (half the memory of bf16, which is
 what lets a 13 GB checkpoint fit beside its text encoder) and decodes them
 with a 256-entry table instead of a cast: an fp8 value IS its byte, so
@@ -54,6 +60,61 @@ def fp8_to(x: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return table[x.view(torch.uint8).to(torch.int32)]
 
 
+def fp8_from(x: torch.Tensor, fp8_dtype: torch.dtype) -> torch.Tensor:
+    """`x.to(fp8_dtype)` on a device with no fp8 cast: cast on the CPU, move back.
+
+    Only the encode direction pays the round trip, and ComfyUI encodes once per
+    weight when it patches one (a LoRA), never per sampling step.
+    """
+    return x.to("cpu").to(fp8_dtype).to(x.device)
+
+
+def quantize_per_tensor_fp8(
+    x: torch.Tensor, scale: torch.Tensor, output_type: torch.dtype = torch.float8_e4m3fn
+) -> torch.Tensor:
+    """comfy-kitchen's eager `quantize_per_tensor_fp8`, minus the fp8 cast."""
+    lp_max = torch.finfo(output_type).max
+    temp = x * (1.0 / scale).to(x.dtype)
+    temp = torch.clamp(temp, -lp_max, lp_max, out=temp)
+    return fp8_from(temp, output_type)
+
+
+def stochastic_rounding_fp8(
+    x: torch.Tensor, rng: torch.Tensor, output_type: torch.dtype = torch.float8_e4m3fn
+) -> torch.Tensor:
+    """comfy-kitchen's eager `stochastic_rounding_fp8`, minus the fp8 cast.
+
+    The arithmetic is the eager backend's, line for line, on the tensor's own
+    device; the result is already an exact fp8 value, so the CPU cast at the end
+    only re-encodes it. A Style LoRA on Krea 2 Image to Image patches the fp8
+    weights through this path, and its last line was the failing cast.
+    """
+    from comfy_kitchen.backends.eager.quantization import calc_mantissa
+
+    if output_type == torch.float8_e4m3fn:
+        exponent_bits, mantissa_bits, exponent_bias = 4, 3, 7
+    elif output_type == torch.float8_e5m2:
+        exponent_bits, mantissa_bits, exponent_bias = 5, 2, 15
+    else:
+        raise ValueError(f"Unsupported output_type: {output_type}")
+
+    x = x.half()
+    sign = torch.sign(x)
+    abs_x = x.abs()
+    sign = torch.where(abs_x == 0, 0, sign)
+    exponent = torch.clamp(torch.floor(torch.log2(abs_x)) + exponent_bias, 0, 2**exponent_bits - 1)
+    normal_mask = ~(exponent == 0)
+    abs_x[:] = calc_mantissa(abs_x, exponent, normal_mask, mantissa_bits, exponent_bias, rng)
+    sign *= torch.where(
+        normal_mask,
+        (2.0 ** (exponent - exponent_bias)) * (1.0 + abs_x),
+        (2.0 ** (-exponent_bias + 1)) * abs_x,
+    )
+    info = torch.finfo(output_type)
+    torch.clamp(sign, min=info.min, max=info.max, out=sign)
+    return fp8_from(sign, output_type)
+
+
 def dequantize_per_tensor_fp8(
     x: torch.Tensor, scale: torch.Tensor, output_type: torch.dtype = torch.bfloat16
 ) -> torch.Tensor:
@@ -65,14 +126,32 @@ def _constraints():
     from comfy_kitchen.constraints import FunctionConstraints, ParamConstraint
 
     floats = frozenset({torch.float32, torch.float16, torch.bfloat16})
+    fp8 = frozenset(FP8_DTYPES)
+    mps = frozenset({"mps"})
     return {
+        "quantize_per_tensor_fp8": FunctionConstraints(
+            params={
+                "x": ParamConstraint(dtypes=floats),
+                "scale": ParamConstraint(dtypes=frozenset({torch.float32})),
+                "output_type": ParamConstraint(dtypes=fp8),
+            },
+            default_devices=mps,
+        ),
+        "stochastic_rounding_fp8": FunctionConstraints(
+            params={
+                "x": ParamConstraint(dtypes=floats),
+                "rng": ParamConstraint(dtypes=frozenset({torch.uint8})),
+                "output_type": ParamConstraint(dtypes=fp8),
+            },
+            default_devices=mps,
+        ),
         "dequantize_per_tensor_fp8": FunctionConstraints(
             params={
-                "x": ParamConstraint(dtypes=frozenset(FP8_DTYPES)),
+                "x": ParamConstraint(dtypes=fp8),
                 "scale": ParamConstraint(dtypes=floats),
                 "output_type": ParamConstraint(dtypes=floats),
             },
-            default_devices=frozenset({"mps"}),
+            default_devices=mps,
         ),
     }
 
@@ -94,7 +173,11 @@ def register(registry=None, mps_available=None) -> bool:
 
         registry.register(
             name=BACKEND_NAME,
-            module=SimpleNamespace(dequantize_per_tensor_fp8=dequantize_per_tensor_fp8),
+            module=SimpleNamespace(
+                dequantize_per_tensor_fp8=dequantize_per_tensor_fp8,
+                quantize_per_tensor_fp8=quantize_per_tensor_fp8,
+                stochastic_rounding_fp8=stochastic_rounding_fp8,
+            ),
             capabilities=_constraints(),
         )
         order = [b for b in getattr(registry, "_priority", ["cuda", "triton", "eager"]) if b != BACKEND_NAME]
