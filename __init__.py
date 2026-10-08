@@ -60,6 +60,10 @@ from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
 from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
 from .host_compute_metrics import sample_host_compute_metrics
+# fp8 checkpoints on Apple Silicon: MPS has no fp8 cast, so the weights are
+# decoded by table. A no-op on every machine without MPS.
+from . import anymatix_mps_fp8
+anymatix_mps_fp8.register()
 # Whose heartbeat answered: every answer names the port this ComfyUI was
 # launched on, and a heartbeat meant for another one is never obeyed.
 from .anymatix_heartbeat_identity import heartbeat_reply, meant_for_another, side_channel_handler
