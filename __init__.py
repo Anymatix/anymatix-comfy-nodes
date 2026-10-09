@@ -16,6 +16,7 @@ import threading
 from server import PromptServer
 import app
 from .fetch import pick_durable_dir
+from .anymatix_credentials import has_civitai_token, set_civitai_token
 
 from .anymatix_checkpoint_fetcher import (
     # AnymatixCheckpointFetcher,
@@ -599,6 +600,23 @@ _start_heartbeat_side_channel()
 # timestamps. The pair `end-requested` … `boot` in one journal is what tells
 # the two apart, and it is the pair that was missing on 2026-08-27.
 _journal("boot", host=socket.gethostname())
+
+
+@routes.post("/anymatix/credentials")
+async def receive_credentials(request):
+    """The user's Civitai key, out of band: never a node input.
+
+    Body `{"civitai": "<key>"}`; an empty or missing value clears it. Held in
+    this process's memory only (`anymatix_credentials.py`); nothing is printed,
+    nothing is written, and no route reads it back -- the answer says only
+    whether a key is now held.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"status": "error", "error": "body is not JSON"}, status=400)
+    set_civitai_token(data.get("civitai") if isinstance(data, dict) else None)
+    return web.json_response({"status": "ok", "civitai": has_civitai_token()})
 
 
 @routes.post('/anymatix/heartbeat')

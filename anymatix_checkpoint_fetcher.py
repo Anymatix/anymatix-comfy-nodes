@@ -43,6 +43,10 @@ except Exception:
     except Exception:
         # Provide a helpful error when import truly fails
         raise
+try:
+    from .anymatix_credentials import civitai_auth_tail, redact_secrets, secrets_redacted, strip_url_token
+except Exception:
+    from anymatix_credentials import civitai_auth_tail, redact_secrets, secrets_redacted, strip_url_token
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader, ControlNetLoader
 
@@ -1020,10 +1024,6 @@ class AnymatixCheckpointFetcher:
                     },
                 ),
             },
-            "optional": {
-                # Optional auth query tail, e.g. "token=xxxx". Not persisted; only used at runtime.
-                "auth": ("STRING", {}),
-            }
         }
 
     RETURN_TYPES = ("STRING",)
@@ -1031,7 +1031,8 @@ class AnymatixCheckpointFetcher:
     CATEGORY = "Anymatix"
     DEPRECATED = True
 
-    def download_model(self, url, auth=None):
+    @secrets_redacted
+    def download_model(self, url):
         pbar = comfy.utils.ProgressBar(1000)
         progress = 0
         pbar.update_absolute(progress, 1000)
@@ -1046,38 +1047,19 @@ class AnymatixCheckpointFetcher:
                 progress = new_progress
                 pbar.update_absolute(progress, 1000)
 
-        # Build base/effective URLs. Prefer explicit auth arg; else, preserve legacy token-in-URL behavior.
-        try:
-            p = urlparse(url)
-            pairs = parse_qsl(p.query, keep_blank_values=True)
-            non_auth = []
-            legacy_auth_pairs = []
-            for k, v in pairs:
-                if k == "token":
-                    legacy_auth_pairs.append((k, v))
-                else:
-                    non_auth.append((k, v))
-            base_query = urlencode(non_auth)
-            base_url = urlunparse(p._replace(query=base_query))
-
-            # Decide which auth to use: explicit auth arg wins; otherwise use legacy token found in URL
-            if auth is not None and len(str(auth)) > 0:
-                to_add = parse_qsl(str(auth), keep_blank_values=True)
-                effective_query = urlencode(non_auth + to_add)
-                effective_url = urlunparse(p._replace(query=effective_query))
-                auth_tail = str(auth)
-            elif legacy_auth_pairs:
-                effective_query = urlencode(non_auth + legacy_auth_pairs)
-                effective_url = urlunparse(p._replace(query=effective_query))
-                auth_tail = urlencode(legacy_auth_pairs)
-            else:
-                effective_url = base_url
-                auth_tail = None
-        except Exception:
-            # Fallback to original behavior if parsing fails
-            base_url = url
-            effective_url = url
-            auth_tail = None
+        # The Civitai key never arrives as an input (`anymatix_credentials.py`);
+        # a token written into the url itself is a secret in the prompt too, so
+        # it is stripped and never used.
+        base_url = strip_url_token(url)
+        auth_tail = civitai_auth_tail(base_url)
+        if auth_tail:
+            p = urlparse(base_url)
+            existing = parse_qsl(p.query, keep_blank_values=True)
+            effective_url = urlunparse(
+                p._replace(query=urlencode(existing + parse_qsl(auth_tail, keep_blank_values=True)))
+            )
+        else:
+            effective_url = base_url
 
         try:
             model_name = download_file(
@@ -1292,7 +1274,7 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
     # Every file url is built BEFORE anything is written, so a url with no
     # revision fails the card at once instead of after a half-fetched pack.
     file_urls = [(f, _chatterbox_pack_file_url(pack_url, f)) for f in pack_files]
-    auth = url_dict.get("auth")
+    auth = civitai_auth_tail(pack_url)
     pack_dir = _chatterbox_pack_dir(pack_type)
     os.makedirs(pack_dir, exist_ok=True)
     for pack_file, file_url in file_urls:
@@ -1396,8 +1378,9 @@ class AnymatixFetcher:
         return {
             "required": {
                 # "url": ("STRING", {"default": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),
-                # Keep declared fields minimal; auth (if present) is accepted at runtime but not exposed in UI
-                "url": ({"url": "STRING", "type": "STRING", "auth": "STRING"}, {}),
+                # No secret is ever a field here: the Civitai key arrives out of
+                # band (`anymatix_credentials.py`).
+                "url": ({"url": "STRING", "type": "STRING"}, {}),
             }
         }
 
@@ -1421,11 +1404,11 @@ class AnymatixFetcher:
     # anyway.
     OUTPUT_NODE = True
 
+    @secrets_redacted
     def download_model(self, url):
         # Avoid printing tokens; only show safe info
         try:
-            safe_preview = {k: ("<redacted>" if k == "auth" else v) for k, v in url.items()}
-            print("download model", type(url), safe_preview)
+            print("download model", type(url), {k: v for k, v in url.items() if k in ("url", "type")})
         except Exception:
             pass
         if url.get("type") in CHATTERBOX_PACKS:
@@ -1446,8 +1429,8 @@ class AnymatixFetcher:
 
         if url.get("type") in _AUX_ANNOTATOR_TYPES:
             root = _ensure_aux_annotator_ckpts_dir()
-            base_url = (url.get("url") or "").strip()
-            auth = url.get("auth")
+            base_url = strip_url_token((url.get("url") or "").strip())
+            auth = civitai_auth_tail(base_url)
             if auth is not None and len(str(auth)) > 0:
                 p = urlparse(base_url)
                 existing = parse_qsl(p.query, keep_blank_values=True)
@@ -1483,8 +1466,8 @@ class AnymatixFetcher:
             phase_name = "fetching"
             pbar.update_absolute(progress, 1000)
 
-            base_url = url.get("url")
-            auth = url.get("auth")
+            base_url = strip_url_token(url.get("url"))
+            auth = civitai_auth_tail(base_url)
 
             sha256_hex = _parse_sha256_uri(base_url or "")
             if sha256_hex:
@@ -1660,7 +1643,7 @@ class AnymatixFetcher:
                 model_type = url.get("type", "unknown")
                 
                 # Create user-friendly error messages based on common error patterns
-                error_str = str(e)
+                error_str = redact_secrets(e)
                 if "Expecting value: line 1 column 1 (char 0)" in error_str:
                     user_msg = f"Failed to download {model_type} model: The model information could not be retrieved from Civitai. This may be due to network issues, rate limiting, or the model being private/unavailable."
                 elif "timeout" in error_str.lower():
@@ -1683,7 +1666,7 @@ class AnymatixFetcher:
                     storage_path = dir
                     user_msg = f"Failed to download {model_type} model: No space left on device.\n[ANYMATIX_STORAGE_FULL:{storage_path}]"
                 else:
-                    user_msg = f"Failed to download {model_type} model: {e}"
+                    user_msg = f"Failed to download {model_type} model: {error_str}"
                 
                 print(f"[ANYMATIX ERROR] {user_msg}")
                 print(f"[ANYMATIX DEBUG] Original error: {error_str}")
@@ -1691,7 +1674,8 @@ class AnymatixFetcher:
                 
                 # Include URL in user message for better debugging
                 user_msg_with_url = f"{user_msg}\nURL: {base_url}"
-                raise Exception(user_msg_with_url) from e
+                # Not chained: the original names the effective url, key included.
+                raise Exception(user_msg_with_url) from None
 
         # AN UNKNOWN TYPE MUST SAY SO, NOT VANISH.
         #
@@ -1738,8 +1722,8 @@ class AnymatixFetcher:
         if url.get("type") in _AUX_ANNOTATOR_TYPES:
             try:
                 root = _ensure_aux_annotator_ckpts_dir()
-                base_url = (url.get("url") or "").strip()
-                auth = url.get("auth")
+                base_url = strip_url_token((url.get("url") or "").strip())
+                auth = civitai_auth_tail(base_url)
                 if auth is not None and len(str(auth)) > 0:
                     p = urlparse(base_url)
                     existing = parse_qsl(p.query, keep_blank_values=True)
@@ -1759,7 +1743,7 @@ class AnymatixFetcher:
         if url["type"] not in dirmap:
             return float("NaN")
 
-        base_url = url.get("url")
+        base_url = strip_url_token(url.get("url"))
         sha256_hex = _parse_sha256_uri(base_url or "")
         if sha256_hex:
             type_folder = dirmap[url["type"]]
@@ -1768,7 +1752,7 @@ class AnymatixFetcher:
                 return hash_string(base_url or "")
             return float("NaN")
 
-        auth = url.get("auth")
+        auth = civitai_auth_tail(base_url)
         if auth is not None and len(auth) > 0:
             p = urlparse(base_url)
             existing = parse_qsl(p.query, keep_blank_values=True)
