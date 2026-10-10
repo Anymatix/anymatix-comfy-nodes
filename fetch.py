@@ -77,6 +77,81 @@ except ImportError:
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 
+# A STALLED DOWNLOAD IS DETECTED, RETRIED FROM WHERE IT STOPPED, AND ONLY THEN
+# REPORTED — naming the file. `bugs/a-local-run-stalled-model-download-given`
+# (app repo): a parallel download with no read timeout sat at 591M of 1.45G for
+# 28 minutes on sleipnir, with no error, until the app gave the run up.
+#
+# DOWNLOAD_STALL_SECONDS  how long a connection may deliver no byte at all
+#                         before it is treated as dead. A slow link still
+#                         delivers bytes; only silence trips it.
+# DOWNLOAD_ATTEMPTS       how many times one segment, or the single stream, is
+#                         tried in all, each resuming at the byte it reached.
+# DOWNLOAD_RETRY_PAUSES   seconds between attempts, the last repeated.
+DOWNLOAD_STALL_SECONDS = 60
+DOWNLOAD_CONNECT_SECONDS = 30
+DOWNLOAD_ATTEMPTS = 5
+DOWNLOAD_RETRY_PAUSES = (2, 5, 10, 20)
+
+
+class DownloadStalled(Exception):
+    """A transfer that kept failing after every attempt it was allowed.
+
+    `reason` is the short form for the person (*no data for 60s, 5 attempts*);
+    the message adds where it stopped, for the log."""
+
+    def __init__(self, message: str, reason: Optional[str] = None):
+        super().__init__(message)
+        self.reason = reason or message
+
+
+def stall_in(e: Optional[BaseException]) -> Optional["DownloadStalled"]:
+    """The `DownloadStalled` at the root of a wrapped download error, if any."""
+    seen = 0
+    while e is not None and seen < 10:
+        if isinstance(e, DownloadStalled):
+            return e
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return None
+
+
+def stalled_download_message(file_name, stall: "DownloadStalled") -> str:
+    """What a run that ran out of attempts says, naming the file."""
+    return (f"Download of {file_name} stopped: {stall.reason}. "
+            f"What arrived is kept; run again to resume.")
+
+
+class DownloadTransportError(Exception):
+    """One single-stream attempt lost its connection or went silent."""
+
+
+def retry_pause_seconds(attempt: int) -> float:
+    if not DOWNLOAD_RETRY_PAUSES:
+        return 0
+    return DOWNLOAD_RETRY_PAUSES[min(attempt, len(DOWNLOAD_RETRY_PAUSES) - 1)]
+
+
+def is_interrupt(e: BaseException) -> bool:
+    """ComfyUI's Stop, which must travel up untouched: never retried, never
+    wrapped into a download error the caller would fall back from."""
+    return "InterruptProcessingException" in type(e).__name__
+
+
+def describe_transport_error(e: BaseException) -> str:
+    """What failed, in the words the error message carries. A read timeout is
+    the stall itself, so it says so instead of aiohttp's or urllib3's phrasing."""
+    if isinstance(e, TimeoutError) or "Timeout" in type(e).__name__:
+        return f"no data for {DOWNLOAD_STALL_SECONDS}s"
+    text = str(e).strip()
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
+RETRYABLE_ASYNC_ERRORS: tuple = (asyncio.TimeoutError, TimeoutError, ConnectionError)
+if AIOHTTP_AVAILABLE:
+    RETRYABLE_ASYNC_ERRORS = RETRYABLE_ASYNC_ERRORS + (aiohttp.ClientError,)
+
+
 def hash_string(input_string):
     encoded_string = input_string.encode()
     hash_object = hashlib.sha256(encoded_string)
@@ -570,7 +645,8 @@ def fetch_headers(url, session):
     remote_sha256 = None
     try:
         # TODO: FIXME: should this be session.head??
-        with session.get(url, allow_redirects=True, stream=True) as response:
+        with session.get(url, allow_redirects=True, stream=True,
+                         timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
             response.raise_for_status()
             if "Content-Disposition" in response.headers:
                 filename_match = re.search(
@@ -604,14 +680,21 @@ def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size:
 
     try:
         # TODO: what if "Range" is not accepted?
-        with session.get(url, headers=req_headers, allow_redirects=True, stream=True) as response_2:
+        # `timeout` is (connect, read): the read bound is the gap between two
+        # bytes, never the length of the download — a silent link raises
+        # instead of waiting for ever (`DOWNLOAD_STALL_SECONDS`).
+        with session.get(url, headers=req_headers, allow_redirects=True, stream=True,
+                         timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response_2:
             response_2.raise_for_status()
             for item in response_2.iter_content(chunk_size):
                 # Check for ComfyUI interrupt signal before processing each chunk
                 check_interrupted()
                 callback(item)
-    except requests.RequestException as e:
+    except requests.HTTPError as e:
         raise Exception(f"HTTP request failed during single-stream download: {e}") from e
+    except requests.RequestException as e:
+        # The link, not the answer: worth another attempt from the byte reached.
+        raise DownloadTransportError(describe_transport_error(e)) from e
     except Exception as e:
         # Re-raise InterruptProcessingException as-is for proper handling
         if "InterruptProcessingException" in type(e).__name__ or "InterruptProcessingException" in str(type(e)):
@@ -925,9 +1008,14 @@ def check_range_response(status: int, content_range: Optional[str], start: int, 
 async def fetch_async_segment(session, url: str, start: int, end: int,
                             segment_id: int, progress_callback: Optional[Callable] = None,
                             part_path: Optional[str] = None,
-                            on_landed: Optional[Callable[[int, int], None]] = None) -> int:
+                            on_landed: Optional[Callable[[int, int], None]] = None,
+                            reached: Optional[dict] = None) -> int:
     """
     Download one byte range STRAIGHT TO ITS OFFSET in the part file.
+
+    `reached[segment_id]`, when given, is kept at the absolute offset of the
+    last byte written, chunk by chunk — what a retry resumes from
+    (`fetch_async_segment_resuming`).
 
     This used to build the segment in memory — `segment_data += chunk` — and
     hand the bytes back to be written once every segment had arrived. With a
@@ -968,6 +1056,8 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
                 await f.write(chunk)
                 position += len(chunk)
                 unrecorded += len(chunk)
+                if reached is not None:
+                    reached[segment_id] = position
                 if progress_callback:
                     progress_callback(len(chunk))
                 if on_landed and unrecorded >= SEGMENT_JOURNAL_STRIDE:
@@ -979,6 +1069,47 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
                 on_landed(segment_id, position)
 
         return segment_id
+
+
+async def fetch_async_segment_resuming(session, url: str, start: int, end: int,
+                                       segment_id: int, progress_callback: Optional[Callable] = None,
+                                       part_path: Optional[str] = None,
+                                       on_landed: Optional[Callable[[int, int], None]] = None) -> int:
+    """
+    One segment, carried on from the byte it reached each time its link fails.
+
+    `bugs/a-local-run-stalled-model-download-given` (app repo). On sleipnir,
+    2026-10-10, a Civitai VAE stopped at 591M of 1.45G and nothing happened for
+    28 minutes: the session had no read timeout, so a segment whose TCP flow
+    went silent without a reset waited for ever, and one segment that failed
+    failed the whole download. Now the session's `sock_read` bound turns the
+    silence into an error, and this resumes the segment from `reached` — the
+    exact byte, not the last journal stride — after a short pause, up to
+    `DOWNLOAD_ATTEMPTS` times. Only transport failures are retried: a range the
+    server will not honour is not going to start honouring it, and is the
+    single-stream fallback's job.
+    """
+    reached = {segment_id: start}
+    attempts = max(1, DOWNLOAD_ATTEMPTS)
+    for attempt in range(attempts):
+        if reached[segment_id] > end:
+            return segment_id
+        try:
+            return await fetch_async_segment(
+                session, url, reached[segment_id], end, segment_id,
+                progress_callback, part_path, on_landed=on_landed, reached=reached
+            )
+        except RETRYABLE_ASYNC_ERRORS as e:
+            if attempt + 1 >= attempts:
+                reason = f"{describe_transport_error(e)}, {attempts} attempts"
+                raise DownloadStalled(
+                    f"segment {segment_id} stopped at byte {reached[segment_id]} of {end + 1}: {reason}",
+                    reason
+                ) from e
+            print(f"[ANYMATIX DOWNLOAD] Segment {segment_id} stopped at byte {reached[segment_id]} "
+                  f"({describe_transport_error(e)}); attempt {attempt + 2} of {attempts} resumes there")
+            await asyncio.sleep(retry_pause_seconds(attempt))
+    return segment_id
 
 
 class AsyncParallelDownloader:
@@ -1001,6 +1132,9 @@ class AsyncParallelDownloader:
         # ran. Zero means there is nothing on disk worth resuming from, and the
         # error path is then free to remove the part file. See `download_async`.
         self.kept_prefix = 0
+        # True when a stall ended the attempt and the part file with its
+        # journal was kept whole for the next run (see `download_async`).
+        self.kept_journal = False
         
     async def download_async(self) -> bool:
         """Execute async parallel download with HTTP/2 optimization"""
@@ -1048,7 +1182,19 @@ class AsyncParallelDownloader:
                 keepalive_timeout=30
             )
             
-            timeout = aiohttp.ClientTimeout(total=None, connect=30)
+            # NO TOTAL — a 27 GB weight takes as long as it takes — BUT A
+            # BOUND ON SILENCE. `sock_read` is the gap between two reads on one
+            # connection: without it a flow that died without a reset (a route
+            # change, a VPN coming up, a NAT that forgot us) left a segment
+            # waiting for ever, which is how sleipnir sat at 591M of 1.45G for
+            # 28 minutes. `fetch_async_segment_resuming` turns the timeout into
+            # a resume from the byte reached.
+            timeout = aiohttp.ClientTimeout(
+                total=None,
+                connect=DOWNLOAD_CONNECT_SECONDS,
+                sock_connect=DOWNLOAD_CONNECT_SECONDS,
+                sock_read=DOWNLOAD_STALL_SECONDS,
+            )
             
             async with aiohttp.ClientSession(
                 connector=connector,
@@ -1113,8 +1259,8 @@ class AsyncParallelDownloader:
 
                 # Download all segments concurrently — what is left of each.
                 tasks = [
-                    fetch_async_segment(session, self.url, start + landed.get(seg_id, 0), end, seg_id,
-                                        progress_update, part_path, on_landed=record.landed)
+                    fetch_async_segment_resuming(session, self.url, start + landed.get(seg_id, 0), end, seg_id,
+                                                 progress_update, part_path, on_landed=record.landed)
                     for seg_id, start, end in segments
                     if start + landed.get(seg_id, 0) <= end
                 ]
@@ -1122,6 +1268,17 @@ class AsyncParallelDownloader:
                 segment_results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 failed_segments = [str(r) for r in segment_results if isinstance(r, BaseException)]
+                stalled = [r for r in segment_results if isinstance(r, DownloadStalled)]
+                if stalled and len(stalled) == len([r for r in segment_results if isinstance(r, BaseException)]):
+                    # THE LINK IS GONE, NOT THE SERVER'S PATIENCE WITH RANGES.
+                    # Every failure is a segment that ran out of attempts on a
+                    # silent or broken connection, so a single stream would
+                    # only stall the same way — and the salvage below would
+                    # throw away every segment past the first hole. The part
+                    # file and its journal are kept exactly as they are, and
+                    # the next run carries each segment on from its byte.
+                    self.kept_journal = True
+                    raise DownloadStalled("; ".join(str(r) for r in stalled[:3]), stalled[0].reason)
                 if failed_segments:
                     # HAND WHAT LANDED TO THE RESUME PATH, WHICH ALREADY EXISTS.
                     #
@@ -1221,7 +1378,7 @@ class AsyncParallelDownloader:
             # nothing left to look at.
             try:
                 stale = self.file_path
-                if self.kept_prefix <= 0 and os.path.exists(stale):
+                if self.kept_prefix <= 0 and not self.kept_journal and os.path.exists(stale):
                     os.remove(stale)
                     clear_part_completion(stale)
             except Exception:
@@ -1348,16 +1505,45 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             # running" every time, silently demoting every download to
             # single-stream.
             outcome: list = []
+            running: dict = {}
+
+            async def run_cancellable():
+                running["loop"] = asyncio.get_running_loop()
+                running["task"] = asyncio.current_task()
+                return await run_async()
 
             def _runner():
                 try:
-                    outcome.append(asyncio.run(run_async()))
+                    outcome.append(asyncio.run(run_cancellable()))
                 except BaseException as e:
                     outcome.append(e)
 
             t = threading.Thread(target=_runner, name="anymatix-parallel-download")
             t.start()
-            t.join()
+            # STOP REACHES THE DOWNLOAD. A bare `t.join()` left this node deaf
+            # to ComfyUI's interrupt for as long as the transfer lasted — and
+            # for ever when it stalled: on sleipnir, 2026-10-10, the app's
+            # interrupt at 09:59 ended nothing, and the next prompt queued
+            # behind a node that would never return. The node thread now
+            # wakes twice a second to ask, and cancels the transfer's task when
+            # told; the part file and its journal stay for a resume.
+            while t.is_alive():
+                t.join(0.5)
+                if not t.is_alive():
+                    break
+                try:
+                    check_interrupted()
+                except BaseException:
+                    loop, task = running.get("loop"), running.get("task")
+                    if loop is not None and task is not None:
+                        try:
+                            loop.call_soon_threadsafe(task.cancel)
+                        except RuntimeError:
+                            # The loop closed between the join and here: the
+                            # transfer ended on its own, nothing to cancel.
+                            pass
+                    t.join()
+                    raise
             if outcome and isinstance(outcome[0], BaseException):
                 raise outcome[0]
             return bool(outcome and outcome[0])
@@ -1372,6 +1558,8 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             return True
         
     except Exception as e:
+        if is_interrupt(e):
+            raise
         print(f"[ANYMATIX DOWNLOAD] Parallel download strategy failed: {e}")
         # Re-raise the exception instead of returning False so it propagates to the node
         raise Exception(f"Parallel download failed: {e}")  from e
@@ -2268,6 +2456,8 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 else:
                     print(f"[ANYMATIX DOWNLOAD] Parallel download was attempted but returned False (likely server doesn't support ranges)")
             except Exception as e:
+                if is_interrupt(e):
+                    raise
                 print(f"[ANYMATIX DOWNLOAD] Parallel download failed with exception, falling back to a single stream: {e}")
                 parallel_success = False
                 parallel_exception = e
@@ -2300,6 +2490,11 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
             # kept for the next run and this one says why; if the server simply
             # does not do ranges, nothing can resume it and it goes.
             if read_segment_journal(part_file, data["file_size"]) is not None:
+                stall = stall_in(parallel_exception)
+                if stall is not None:
+                    raise DownloadStalled(
+                        stalled_download_message(data["file_name"], stall), stall.reason
+                    ) from parallel_exception
                 if parallel_exception is not None:
                     raise Exception(
                         f"Download of {data['file_name']} interrupted; the bytes already on disk "
@@ -2364,7 +2559,32 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                                 print(f"[ANYMATIX PROGRESS] {mb_downloaded:.0f}MB / {mb_total:.0f}MB ({percent:.1f}%)")
                                 
                     try:
-                        fetch(effective, session, cb, local_file_size)
+                        # RESUMED FROM THE BYTE REACHED, A BOUNDED NUMBER OF
+                        # TIMES. The file stays open, so each attempt appends
+                        # where the last one stopped and asks the server for
+                        # exactly that range.
+                        attempts = max(1, DOWNLOAD_ATTEMPTS)
+                        for attempt in range(attempts):
+                            try:
+                                fetch(effective, session, cb, downloaded_size)
+                                break
+                            except DownloadTransportError as e:
+                                file.flush()
+                                # A link that never delivered a byte is a wrong
+                                # address or no network at all: said at once,
+                                # not after a minute of pauses.
+                                if downloaded_size == 0:
+                                    raise
+                                if attempt + 1 >= attempts:
+                                    reason = f"{e}, {attempts} attempts"
+                                    raise DownloadStalled(
+                                        stalled_download_message(data["file_name"], DownloadStalled(reason, reason)),
+                                        reason
+                                    ) from e
+                                print(f"[ANYMATIX DOWNLOAD] Single stream stopped at byte {downloaded_size} ({e}); "
+                                      f"attempt {attempt + 2} of {attempts} resumes there")
+                                time.sleep(retry_pause_seconds(attempt))
+                                check_interrupted()
                     finally:
                         if progress_bar:
                             try:
@@ -2389,8 +2609,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
                 # Self-heal: drop the partial so the next run restarts clean — UNLESS
                 # this is a user interrupt (then keep the partial for a real resume).
-                is_interrupt = "InterruptProcessingException" in type(e).__name__
-                if not is_interrupt:
+                # Nor when the link died after every attempt: the bytes that
+                # arrived are good, and the next run resumes from them.
+                keep_partial = is_interrupt(e) or isinstance(e, DownloadStalled)
+                if not keep_partial:
                     try:
                         if os.path.exists(part_file):
                             os.remove(part_file)
@@ -2399,6 +2621,10 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     except Exception:
                         pass
 
+                # A link that died after every attempt is the whole story, and
+                # its message already names the file.
+                if isinstance(single_stream_exception, DownloadStalled):
+                    raise single_stream_exception
                 # If both the parallel and the single-stream attempt failed, raise the more serious exception
                 if parallel_exception and single_stream_exception:
                     # Prefer the parallel exception when it says more; otherwise the single-stream one
