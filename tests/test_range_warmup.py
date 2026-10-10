@@ -34,11 +34,14 @@ pytest.importorskip("aiohttp")
 pytest.importorskip("aiofiles")
 
 
-def serve_cold(blob, cold=2, expire_after=None, stalls=0, stall_after=256 * 1024, stall_from=2):
+def serve_cold(blob, cold=2, expire_after=None, stalls=0, stall_after=256 * 1024, stall_from=2,
+               head_forbidden=False):
     """`cold`: range requests answered 200 before the file is 'warm'.
     `expire_after`: signed GETs served before the first signature expires.
     `stalls`: GETs, from the `stall_from`-th signed GET on (the first is the
-    header read), that send `stall_after` bytes and then drop the connection."""
+    header read), that send `stall_after` bytes and then drop the connection.
+    `head_forbidden`: the signed URL refuses HEAD with 403, as a presigned
+    Cloudflare R2 URL does (it is signed for GET)."""
     size = len(blob)
     state = {"api": 0, "gets": [], "ranges_answered_200": 0, "signed_gets": 0, "valid": {1}, "stalled": 0}
     lock = threading.Lock()
@@ -71,6 +74,11 @@ def serve_cold(blob, cold=2, expire_after=None, stalls=0, stall_after=256 * 1024
             if self.path.startswith("/api/"):
                 return self._redirect()
             if not self._signed_ok():
+                return
+            if head_forbidden:
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Length", str(size))
@@ -225,5 +233,23 @@ def test_the_single_stream_starts_over_when_the_server_never_resumes(quick, monk
         path = fetch.download_file(f"http://127.0.0.1:{port}/api/weights.bin", tempfile.mkdtemp())
         with open(path, "rb") as f:
             assert f.read() == blob, "the restart from byte 0 did not produce the file"
+    finally:
+        server.shutdown()
+
+
+def test_a_presigned_r2_url_that_refuses_head_is_still_downloaded_in_parallel(quick):
+    """Civitai's R2 delivery: HEAD on the signed URL is 403, a ranged GET is 206.
+    Resolving with HEAD sent every such file to one stream (DreamShaper 8,
+    2026-10-10)."""
+    blob = os.urandom(1 << 20) * 8
+    server, port, state = serve_cold(blob, cold=0, head_forbidden=True)
+    part = os.path.join(tempfile.mkdtemp(), "weights.bin.part")
+    try:
+        assert fetch.check_range_support(f"http://127.0.0.1:{port}/api/weights.bin") == (True, len(blob))
+        assert fetch.fetch_parallel(f"http://127.0.0.1:{port}/api/weights.bin", part, max_connections=4) is True
+        with open(part, "rb") as f:
+            assert f.read() == blob
+        segments = [g for g in state["gets"] if g[:2] != (0, 0)]
+        assert len(segments) >= 2 and all(code == 206 for _, _, code in segments), state["gets"]
     finally:
         server.shutdown()

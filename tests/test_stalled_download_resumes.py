@@ -32,8 +32,8 @@ pytest.importorskip("aiofiles")
 
 
 def serve_stalling(blob, stalls, stall_after=256 * 1024, hold=30.0):
-    """A Range server whose first `stalls` GETs send `stall_after` bytes and
-    then go silent for `hold` seconds with the connection open."""
+    """A Range server whose first `stalls` segment GETs send `stall_after` bytes
+    and then go silent for `hold` seconds with the connection open."""
     size = len(blob)
     state = {"stalled": 0, "gets": []}
     lock = threading.Lock()
@@ -58,7 +58,10 @@ def serve_stalling(blob, stalls, stall_after=256 * 1024, hold=30.0):
                 start, end = int(a), (int(b) if b else size - 1)
             with lock:
                 state["gets"].append((start, end))
-                stall = state["stalled"] < stalls
+                # Only a segment stalls: a one-byte range is a probe (the
+                # address resolution and the warm-up both ask for byte 0),
+                # and how many probes come first is not what this tests.
+                stall = state["stalled"] < stalls and end > start
                 if stall:
                     state["stalled"] += 1
             view = memoryview(blob)[start:end + 1]

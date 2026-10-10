@@ -1522,6 +1522,15 @@ def probe_range(final_url: str, label: str = "") -> Optional[bool]:
     return False
 
 
+def size_from_response(response) -> Optional[int]:
+    """The whole file's size: the total of a `206`'s Content-Range, or a `200`'s Content-Length."""
+    if response.status_code == 206:
+        total = response.headers.get('Content-Range', '').rpartition('/')[2]
+        return int(total) if total.isdigit() else None
+    content_length = response.headers.get('Content-Length')
+    return int(content_length) if content_length and content_length.isdigit() else None
+
+
 def resolve_for_ranges(url: str) -> Tuple[bool, Optional[int], str]:
     """
     Where `url` really lives, whether that place serves byte ranges, and the size.
@@ -1533,14 +1542,22 @@ def resolve_for_ranges(url: str) -> Tuple[bool, Optional[int], str]:
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library not available for range support check")
 
+    # A GET FOR ONE BYTE, NOT A HEAD. Civitai also redirects to presigned
+    # Cloudflare R2 URLs (`civitai-delivery-worker-prod...r2.cloudflarestorage.com`),
+    # and a presigned GET URL refuses HEAD with 403. That 403 sent every
+    # R2-served file to the single stream (measured 2026-10-10: DreamShaper 8,
+    # version 128713: HEAD 403, `Range: bytes=0-0` 206 `bytes 0-0/2132625894`;
+    # app repo, bugs/a-resumed-civitai-download-re-fetches-whole-file). The body
+    # is never read: a server that ignores the range (a cold B2 file) starts
+    # sending the whole file, and closing the response drops it.
     try:
-        with requests.head(url, allow_redirects=True,
-                           timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
+        with requests.get(url, headers={'Range': 'bytes=0-0'}, stream=True, allow_redirects=True,
+                          timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
             response.raise_for_status()
             final_url = response.url
-            accepts_ranges = response.headers.get('Accept-Ranges', '').lower() == 'bytes'
-            content_length = response.headers.get('Content-Length')
-            file_size = int(content_length) if content_length else None
+            accepts_ranges = (response.status_code == 206
+                              or response.headers.get('Accept-Ranges', '').lower() == 'bytes')
+            file_size = size_from_response(response)
     except requests.RequestException as e:
         raise Exception(f"Failed to check range support for {redact_url(url)}: {e}") from e
 
