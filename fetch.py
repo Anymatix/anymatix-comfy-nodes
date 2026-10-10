@@ -93,6 +93,19 @@ DOWNLOAD_CONNECT_SECONDS = 30
 DOWNLOAD_ATTEMPTS = 5
 DOWNLOAD_RETRY_PAUSES = (2, 5, 10, 20)
 
+# RANGE_WARMUP_PAUSES     seconds before asking AGAIN for a range that was
+#                         answered with the whole file (`200`), one per retry.
+#
+# A `200` to a range request is not always a server that does not do ranges.
+# Measured 2026-10-10 against Civitai's live API, no key, public files
+# (`bugs/a-resumed-civitai-download-re-fetches-whole-file`, app repo): the
+# download redirects to a signed Backblaze B2 URL behind Cloudflare, and on a
+# file nobody has fetched lately B2 answers the first one or two range requests
+# with `200` and every later one with `206` — 40 cold files of 40, one request a
+# second. Treating the first answer as final failed every segment of the
+# sleipnir resume and sent a 1.45 GB VAE back to byte 0.
+RANGE_WARMUP_PAUSES = (1, 2, 3, 5, 8)
+
 
 class DownloadStalled(Exception):
     """A transfer that kept failing after every attempt it was allowed.
@@ -679,17 +692,23 @@ def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size:
         req_headers = {'Range': f'bytes={local_file_size}-'}
 
     try:
-        # TODO: what if "Range" is not accepted?
         # `timeout` is (connect, read): the read bound is the gap between two
         # bytes, never the length of the download — a silent link raises
         # instead of waiting for ever (`DOWNLOAD_STALL_SECONDS`).
         with session.get(url, headers=req_headers, allow_redirects=True, stream=True,
                          timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response_2:
             response_2.raise_for_status()
+            if local_file_size > 0 and response_2.status_code == 200:
+                # The whole file, to a request for its tail: appended, it
+                # would corrupt the part file. The caller asks again, and
+                # starts over only when the server keeps doing it.
+                raise RangeIgnored(f"HTTP 200 to Range bytes={local_file_size}-")
             for item in response_2.iter_content(chunk_size):
                 # Check for ComfyUI interrupt signal before processing each chunk
                 check_interrupted()
                 callback(item)
+    except RangeIgnored:
+        raise
     except requests.HTTPError as e:
         raise Exception(f"HTTP request failed during single-stream download: {e}") from e
     except requests.RequestException as e:
@@ -980,6 +999,47 @@ class RangeNotHonoured(Exception):
     """The server answered a range request with something other than that range."""
 
 
+class RangeIgnored(RangeNotHonoured):
+    """The server answered a range request with the whole file (`200`).
+
+    Worth asking again before believing it: see `RANGE_WARMUP_PAUSES`."""
+
+
+class SignedUrlRefused(Exception):
+    """The resolved (signed) address answered 401/403: its signature expired,
+    so the address the card names has to be resolved again."""
+
+
+class DownloadUrl:
+    """
+    THE ADDRESS THE SEGMENTS ASK, RESOLVED ONCE.
+
+    `source` is the address the card names (Civitai's
+    `/api/download/models/<id>`); `current` is where its redirect leads — a
+    signed storage URL. Every segment and every retry used to ask `source`, so
+    each one cost a round trip to the API and got a differently signed URL.
+    Now they share one. A signature lasts an hour on Civitai (by the timestamps
+    in it), which a slow download can outlive: a 401/403 from `current`
+    resolves `source` again (`refresh`).
+    """
+
+    def __init__(self, source: str, resolved: Optional[str] = None):
+        self.source = source
+        self.current = resolved or source
+        self._refreshing: Optional["asyncio.Lock"] = None
+
+    async def refresh(self, session, stale: str) -> None:
+        if self._refreshing is None:
+            self._refreshing = asyncio.Lock()
+        async with self._refreshing:
+            if self.current != stale:
+                return  # another segment already resolved it again
+            async with session.head(self.source, allow_redirects=True) as response:
+                response.raise_for_status()
+                self.current = str(response.url)
+            print(f"[ANYMATIX DOWNLOAD] The signed address was refused; resolved {redact_url(self.source)} again")
+
+
 def check_range_response(status: int, content_range: Optional[str], start: int, end: int) -> None:
     """
     A RANGE REQUEST IS ANSWERED BY THAT RANGE, OR NOT AT ALL.
@@ -993,6 +1053,8 @@ def check_range_response(status: int, content_range: Optional[str], start: int, 
     the parallel strategy fails, and the downloader falls back to one stream,
     which knows what to do with a `200`.
     """
+    if status == 200:
+        raise RangeIgnored(f"HTTP 200 to Range bytes={start}-{end}")
     if status != 206:
         raise RangeNotHonoured(f"HTTP {status} to Range bytes={start}-{end}")
     if content_range:
@@ -1040,9 +1102,19 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
         raise ValueError("fetch_async_segment needs the part file to write into")
 
     headers = {'Range': f'bytes={start}-{end}'}
+    address = url.current if isinstance(url, DownloadUrl) else url
 
-    async with session.get(url, headers=headers) as response:
-        check_range_response(response.status, response.headers.get('Content-Range'), start, end)
+    async with session.get(address, headers=headers) as response:
+        if response.status in (401, 403) and isinstance(url, DownloadUrl) and address != url.source:
+            response.close()
+            raise SignedUrlRefused(f"HTTP {response.status} from the signed address")
+        try:
+            check_range_response(response.status, response.headers.get('Content-Range'), start, end)
+        except RangeNotHonoured:
+            # Unread: a `200` is the whole file, and reading it to reuse the
+            # connection would download it.
+            response.close()
+            raise
 
         async with aiofiles.open(part_path, 'r+b') as f:
             await f.seek(start)
@@ -1091,7 +1163,10 @@ async def fetch_async_segment_resuming(session, url: str, start: int, end: int,
     """
     reached = {segment_id: start}
     attempts = max(1, DOWNLOAD_ATTEMPTS)
-    for attempt in range(attempts):
+    warmups = 0
+    refreshes = 0
+    attempt = 0
+    while attempt < attempts:
         if reached[segment_id] > end:
             return segment_id
         try:
@@ -1099,6 +1174,20 @@ async def fetch_async_segment_resuming(session, url: str, start: int, end: int,
                 session, url, reached[segment_id], end, segment_id,
                 progress_callback, part_path, on_landed=on_landed, reached=reached
             )
+        except RangeIgnored:
+            # Asked again, not given up on, and not an attempt: the server is
+            # warming the file, not failing (`RANGE_WARMUP_PAUSES`).
+            if warmups >= len(RANGE_WARMUP_PAUSES):
+                raise
+            await asyncio.sleep(RANGE_WARMUP_PAUSES[warmups])
+            warmups += 1
+            continue
+        except SignedUrlRefused:
+            if refreshes >= 2:
+                raise
+            refreshes += 1
+            await url.refresh(session, url.current)
+            continue
         except RETRYABLE_ASYNC_ERRORS as e:
             if attempt + 1 >= attempts:
                 reason = f"{describe_transport_error(e)}, {attempts} attempts"
@@ -1109,6 +1198,7 @@ async def fetch_async_segment_resuming(session, url: str, start: int, end: int,
             print(f"[ANYMATIX DOWNLOAD] Segment {segment_id} stopped at byte {reached[segment_id]} "
                   f"({describe_transport_error(e)}); attempt {attempt + 2} of {attempts} resumes there")
             await asyncio.sleep(retry_pause_seconds(attempt))
+            attempt += 1
     return segment_id
 
 
@@ -1388,61 +1478,81 @@ class AsyncParallelDownloader:
 
 
 def check_range_support(url: str) -> Tuple[bool, Optional[int]]:
-    """Check if server supports range requests and get file size"""
+    """Whether `url` serves byte ranges, and its size (see `resolve_for_ranges`)."""
+    supports, size, _ = resolve_for_ranges(url)
+    return supports, size
+
+
+def probe_range(final_url: str, label: str = "") -> Optional[bool]:
+    """
+    ASK FOR ONE BYTE, AND ASK AGAIN IF THE ANSWER IS THE WHOLE FILE.
+
+    True on a `206`; False when every warm-up retry still got a `200`, or the
+    server answered something else; None when the probe could not be made (no
+    network answer), which tells the caller nothing.
+
+    `Accept-Ranges: bytes` is not the answer: Civitai's B2 sends it on the very
+    responses that ignore the range (`RANGE_WARMUP_PAUSES`). One real request
+    is, and it also warms the file for the segments that follow, so they meet
+    `206` from their first request instead of all meeting `200` together.
+    """
+    for warmup in range(len(RANGE_WARMUP_PAUSES) + 1):
+        try:
+            with requests.get(final_url, headers={'Range': 'bytes=0-0'}, stream=True,
+                              timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS),
+                              allow_redirects=False) as response:
+                status = response.status_code
+        except requests.RequestException as e:
+            print(f"[ANYMATIX RANGE] Range probe failed: {describe_transport_error(e)}")
+            return None
+        if status == 206:
+            if warmup:
+                print(f"[ANYMATIX RANGE] {label}range requests honoured after {warmup} "
+                      f"answer(s) of the whole file (a cold file warming up)")
+            return True
+        if status != 200:
+            print(f"[ANYMATIX RANGE] Range probe answered HTTP {status}")
+            return False
+        if warmup < len(RANGE_WARMUP_PAUSES):
+            print(f"[ANYMATIX RANGE] {label}a range request was answered with the whole file; "
+                  f"asking again in {RANGE_WARMUP_PAUSES[warmup]}s")
+            time.sleep(RANGE_WARMUP_PAUSES[warmup])
+            check_interrupted()
+    print(f"[ANYMATIX RANGE] {label}the server keeps answering ranges with the whole file")
+    return False
+
+
+def resolve_for_ranges(url: str) -> Tuple[bool, Optional[int], str]:
+    """
+    Where `url` really lives, whether that place serves byte ranges, and the size.
+
+    The redirect is followed ONCE here and the final address returned, so the
+    segments ask it directly (`DownloadUrl`) instead of each going through the
+    redirect for a freshly signed copy.
+    """
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library not available for range support check")
-        
+
     try:
-        # First try HEAD request to get the final URL after redirects
-        with requests.head(url, allow_redirects=True, timeout=10) as response:
+        with requests.head(url, allow_redirects=True,
+                           timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
             response.raise_for_status()
-            
-            # Get the final redirected URL - this is what we'll actually download from
             final_url = response.url
-            
             accepts_ranges = response.headers.get('Accept-Ranges', '').lower() == 'bytes'
             content_length = response.headers.get('Content-Length')
             file_size = int(content_length) if content_length else None
-            
-            # If Accept-Ranges header is present and says 'bytes', we're good
-            if accepts_ranges:
-                print(f"[ANYMATIX RANGE] Server explicitly supports Range requests via Accept-Ranges header")
-                return True, file_size
-            
-            # Special handling for known cloud storage services that support ranges but may have signed URLs
-            if any(domain in final_url.lower() for domain in [
-                'cloudflarestorage.com',  # Cloudflare R2
-                'amazonaws.com',          # AWS S3
-                's3.amazonaws.com',       # AWS S3
-                'digitaloceanspaces.com', # DigitalOcean Spaces
-                'storage.googleapis.com', # Google Cloud Storage
-                'blob.core.windows.net'   # Azure Blob Storage
-            ]):
-                print(f"[ANYMATIX RANGE] Assuming Range support for cloud storage URL: {final_url.split('/')[2]}")
-                return True, file_size
-            
-            # If no Accept-Ranges header, try a small range request to test
-            # IMPORTANT: Use the SAME final_url to avoid different signed URLs
-            if file_size and file_size > 1024:
-                print(f"[ANYMATIX RANGE] Testing Range request support (no Accept-Ranges header found)")
-                try:
-                    test_headers = {'Range': 'bytes=0-1023'}  # Request first 1KB
-                    # Use final_url directly with allow_redirects=False to test exact same endpoint
-                    with requests.get(final_url, headers=test_headers, stream=True, timeout=10, allow_redirects=False) as test_response:
-                        if test_response.status_code == 206:  # Partial Content
-                            print(f"[ANYMATIX RANGE] Server supports Range requests (tested with small range)")
-                            return True, file_size
-                        else:
-                            print(f"[ANYMATIX RANGE] Server doesn't support Range requests (got status {test_response.status_code})")
-                except Exception as e:
-                    print(f"[ANYMATIX RANGE] Range test failed: {e}")
-                    # Don't raise here, just return False - this is expected for servers that don't support ranges
-            
-            return False, file_size
     except requests.RequestException as e:
         raise Exception(f"Failed to check range support for {redact_url(url)}: {e}") from e
-    except Exception as e:
-        raise Exception(f"Unexpected error checking range support for {redact_url(url)}: {e}") from e
+
+    if file_size is not None and file_size <= 1:
+        return False, file_size, final_url
+    probed = probe_range(final_url)
+    if probed is None:
+        # No answer to the probe: the header is all there is to go on.
+        return accepts_ranges, file_size, final_url
+    if probed:
+        print(f"[ANYMATIX RANGE] Server supports Range requests ({final_url.split('/')[2]})")
+    return probed, file_size, final_url
 
 
 def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -1459,17 +1569,15 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
     if not REQUESTS_AVAILABLE:
         raise ImportError("requests library not available for parallel download")
     
-    # Check server capabilities
-    supports_ranges, total_size = check_range_support(url)
+    # Check server capabilities, at the address the redirect leads to.
+    supports_ranges, total_size, final_url = resolve_for_ranges(url)
+    address = DownloadUrl(url, final_url)
     
     if not supports_ranges or not total_size:
-        # For signed URLs (like Civitai), try a live range test during actual download
-        if not supports_ranges and total_size:
-            print(f"[ANYMATIX DOWNLOAD] Server capabilities unknown - will attempt range detection during download")
-            # We'll try parallel anyway and fall back if it fails
-        else:
-            print(f"[ANYMATIX DOWNLOAD] Parallel download not possible: supports_ranges={supports_ranges}, total_size={total_size}")
-            return False
+        # The probe asked for a range and was refused even after the warm-up
+        # (`probe_range`), or the size is unknown: one stream it is.
+        print(f"[ANYMATIX DOWNLOAD] Parallel download not possible: supports_ranges={supports_ranges}, total_size={total_size}")
+        return False
         
     # Skip parallel for small files (< 5MB)
     if total_size and total_size < 5 * 1024 * 1024:
@@ -1491,7 +1599,7 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
             print(f"[ANYMATIX DOWNLOAD] Using async parallel download strategy")
 
             async def run_async():
-                downloader = AsyncParallelDownloader(url, file_path, total_size, callback, max_connections)
+                downloader = AsyncParallelDownloader(address, file_path, total_size, callback, max_connections)
                 success = await downloader.download_async()
                 if not success:
                     raise Exception(f"Async parallel download failed for {redact_url(url)}")
@@ -2564,10 +2672,37 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                         # where the last one stopped and asks the server for
                         # exactly that range.
                         attempts = max(1, DOWNLOAD_ATTEMPTS)
-                        for attempt in range(attempts):
+                        attempt = 0
+                        warmups = 0
+                        while attempt < attempts:
                             try:
                                 fetch(effective, session, cb, downloaded_size)
                                 break
+                            except RangeIgnored as e:
+                                # A COLD FILE FIRST, A SERVER WITHOUT RANGES
+                                # ONLY AFTER THE WARM-UP (`RANGE_WARMUP_PAUSES`).
+                                # Neither is an attempt: nothing failed.
+                                if warmups < len(RANGE_WARMUP_PAUSES):
+                                    print(f"[ANYMATIX DOWNLOAD] {e} on resume at byte {downloaded_size}; "
+                                          f"asking again in {RANGE_WARMUP_PAUSES[warmups]}s")
+                                    time.sleep(RANGE_WARMUP_PAUSES[warmups])
+                                    warmups += 1
+                                    check_interrupted()
+                                    continue
+                                # The fallback: the server will not resume, so
+                                # this run starts the file over instead of
+                                # failing on it.
+                                print(f"[ANYMATIX DOWNLOAD] The server keeps answering the resume of "
+                                      f"{data['file_name']} with the whole file; starting it again from byte 0")
+                                file.seek(0)
+                                file.truncate()
+                                downloaded_size = 0
+                                if progress_bar:
+                                    try:
+                                        progress_bar.reset()
+                                    except Exception:
+                                        pass
+                                continue
                             except DownloadTransportError as e:
                                 file.flush()
                                 # A link that never delivered a byte is a wrong
@@ -2585,6 +2720,7 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                                       f"attempt {attempt + 2} of {attempts} resumes there")
                                 time.sleep(retry_pause_seconds(attempt))
                                 check_interrupted()
+                                attempt += 1
                     finally:
                         if progress_bar:
                             try:

@@ -123,7 +123,8 @@ def test_a_link_that_never_comes_back_fails_bounded_and_keeps_the_bytes(quick):
         assert os.path.getsize(part) == len(blob), "the part file was not kept for a resume"
         journal = fetch.read_segment_journal(part, len(blob))
         assert journal is not None, "the journal was not kept for a resume"
-        assert len(state["gets"]) == 2 * 3, f"each of 2 segments tried 3 times: {state['gets']}"
+        segments = [g for g in state["gets"] if g != (0, 0)]  # not the range probe
+        assert len(segments) == 2 * 3, f"each of 2 segments tried 3 times: {state['gets']}"
     finally:
         server.shutdown()
 

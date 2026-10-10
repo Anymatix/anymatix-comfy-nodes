@@ -61,9 +61,11 @@ def test_a_killed_parallel_download_fetches_only_what_is_missing():
             assert f.read() == blob, "the resumed file is not the served file"
         assert fetch.part_completion_is_recorded(part, len(blob))
         assert not os.path.exists(fetch.segment_journal_for(part)), "a finished download keeps no journal"
-        fetched = sum(e - s + 1 for s, e in served["gets"])
+        # The one-byte range probe (`probe_range`) is not a segment.
+        segments = [(s, e) for s, e in served["gets"] if (s, e) != (0, 0)]
+        fetched = sum(e - s + 1 for s, e in segments)
         assert fetched == len(blob) - landed, f"fetched {fetched} bytes, {len(blob) - landed} were missing"
-        assert all(s > 0 for s, e in served["gets"]), "a segment started again from byte zero"
+        assert all(s > 0 for s, e in segments), "a segment started again from byte zero"
     finally:
         server.shutdown()
 
