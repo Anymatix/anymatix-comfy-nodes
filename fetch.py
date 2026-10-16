@@ -1202,6 +1202,35 @@ async def fetch_async_segment_resuming(session, url: str, start: int, end: int,
     return segment_id
 
 
+def segment_step(total_size: int, max_connections: int) -> int:
+    """
+    How many bytes each segment of a fresh parallel download gets.
+
+    ONE SEGMENT PER CONNECTION, NEVER ONE MORE. This was `total_size //
+    max_connections`, a floor: whenever the size is not a multiple of the
+    connection count the remainder became an extra segment of a few bytes
+    (6 for the 21 701 367 310-byte LTX 2.3 FP4 checkpoint, 2 for the
+    9 447 702 218-byte Gemma encoder), queued for a connection the eight others
+    held for minutes, until its attempts ran out and the download failed
+    (`bugs/a-parallel-download-s-last-segment-stalls`, app repo). The ceiling
+    spreads the remainder instead: the last segment is shorter by fewer than
+    `max_connections` bytes. At least 1 MiB per segment, so a small file gets
+    fewer segments than connections, never more.
+    """
+    return max(1024 * 1024, -(-total_size // max(1, max_connections)))
+
+
+def segment_layout(total_size: int, segment_size: int) -> List[Tuple[int, int, int]]:
+    """`(segment_id, start, end)` for every segment, `end` INCLUSIVE as in the
+    `Range` header, covering bytes `0 .. total_size - 1` exactly once. The
+    step is `segment_step` for a fresh download, and the journal's for a
+    resumed one: its offsets only mean something in its own layout."""
+    return [
+        (segment_id, start, min(start + segment_size, total_size) - 1)
+        for segment_id, start in enumerate(range(0, total_size, segment_size))
+    ]
+
+
 class AsyncParallelDownloader:
     """Ultra-modern async parallel downloader with HTTP/2 and connection pooling"""
     
@@ -1247,14 +1276,9 @@ class AsyncParallelDownloader:
             # fixes the layout: its offsets only mean something in its own.
             journal = read_segment_journal(self.file_path, self.total_size)
             segment_size = journal["segment_size"] if journal else \
-                max(1024*1024, self.total_size // self.max_connections)  # At least 1MB per segment
-            segments = []
-            
-            for i in range(0, self.total_size, segment_size):
-                start = i
-                end = min(i + segment_size - 1, self.total_size - 1)
-                segments.append((len(segments), start, end))
-            
+                segment_step(self.total_size, self.max_connections)
+            segments = segment_layout(self.total_size, segment_size)
+
             # Configure HTTP/2 connector with connection pooling
             # KEEP THE CONNECTIONS ALIVE, WHICH IS THE ENTIRE POINT.
             #
@@ -1347,10 +1371,28 @@ class AsyncParallelDownloader:
                     landed = {}
                 record = SegmentJournal(part_path, self.total_size, segment_size, segments, landed)
 
-                # Download all segments concurrently — what is left of each.
+                # Download all segments concurrently — what is left of each —
+                # BUT NO MORE AT ONCE THAN THE POOL HAS CONNECTIONS.
+                #
+                # A segment queued in aiohttp's pool is timed by
+                # `ClientTimeout.connect`, and its retries count the wait as
+                # failures: a segment behind eight multi-GB transfers spends its
+                # whole budget in the queue without receiving a byte
+                # (`bugs/a-parallel-download-s-last-segment-stalls`, app repo:
+                # `segment 8 stopped at byte 21701367304 of 21701367310`). A
+                # fresh layout never has more segments than connections
+                # (`segment_layout`); a journal's layout can, and its extra
+                # segments wait HERE, where no clock runs.
+                slots = asyncio.Semaphore(self.max_connections)
+
+                async def when_a_connection_is_free(seg_id, start, end):
+                    async with slots:
+                        return await fetch_async_segment_resuming(
+                            session, self.url, start, end, seg_id,
+                            progress_update, part_path, on_landed=record.landed)
+
                 tasks = [
-                    fetch_async_segment_resuming(session, self.url, start + landed.get(seg_id, 0), end, seg_id,
-                                                 progress_update, part_path, on_landed=record.landed)
+                    when_a_connection_is_free(seg_id, start + landed.get(seg_id, 0), end)
                     for seg_id, start, end in segments
                     if start + landed.get(seg_id, 0) <= end
                 ]
