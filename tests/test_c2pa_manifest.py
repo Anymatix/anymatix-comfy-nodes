@@ -13,8 +13,7 @@ The claims these tests defend:
      `Anymatix`, and carries no thumbnail and nothing of the job;
   3. the IPTC label is still where exiftool reads it after signing, and the
      pixels decode exactly as they did before;
-  4. a timestamp is added when the TSA answers, and an unreachable or failing
-     TSA only costs the timestamp, within a short timeout;
+  4. signing never opens a network connection, and adds no timestamp;
   5. a signing failure of any kind leaves a readable, labelled file and a
      successful save;
   6. the signing key is generated on the machine once, kept owner-only, and
@@ -26,14 +25,11 @@ off the network and out of the real per-user data directory.
 """
 
 import datetime
-import http.server
 import json
 import os
 import socket
 import stat
 import sys
-import threading
-import time
 
 import numpy as np
 import pytest
@@ -69,7 +65,7 @@ def c2pa_report(path):
         return json.loads(reader.json())
 
 
-def assert_signed_untrusted(path, timestamped=False):
+def assert_signed_untrusted(path):
     report = c2pa_report(path)
     assert report["validation_state"] == "Valid"
     results = report["validation_results"]["activeManifest"]
@@ -97,7 +93,7 @@ def assert_signed_untrusted(path, timestamped=False):
     info = manifest["signature_info"]
     assert info["issuer"] == "Anymatix"
     assert info["common_name"] == signing.SIGNER_COMMON_NAME
-    assert ("time" in info) == timestamped
+    assert "time" not in info
     assert SECRET not in json.dumps(report)
     return report
 
@@ -105,12 +101,6 @@ def assert_signed_untrusted(path, timestamped=False):
 def assert_not_signed(path):
     with pytest.raises(c2pa.C2paError):
         c2pa_report(path)
-
-
-@pytest.fixture
-def fresh_tsa_state(monkeypatch):
-    """No backoff carried over from another test."""
-    monkeypatch.setattr(signing, "_tsa_unreachable_until", 0.0)
 
 
 # ----------------------------------------------------------------- images ----
@@ -263,92 +253,27 @@ def test_every_video_rung_is_signed_through_the_node(nodes, tmp_path, rung, with
     assert no_stray_temp_files(str(tmp_path / SECRET)) == []
 
 
-# --------------------------------------------------------------- the timestamp ----
+# ------------------------------------------------------------ no network ----
 
 
-def test_a_reachable_tsa_timestamps_the_signature(tmp_path, monkeypatch, fresh_tsa_state):
-    url = signing.TSA_URL
-    try:
-        socket.create_connection(("timestamp.digicert.com", 80), timeout=3).close()
-    except OSError:
-        pytest.skip("the public TSA is not reachable from here")
-    monkeypatch.setenv("ANYMATIX_C2PA_TSA", url)
-    path = str(tmp_path / "a.png")
-    formats.write_image(a_gradient(), path, extension="png")
-    report = assert_signed_untrusted(path, timestamped=True)
-    assert "time" in report["manifests"][report["active_manifest"]]["signature_info"]
-
-
-def test_a_refused_tsa_costs_only_the_timestamp(tmp_path, monkeypatch, capsys, fresh_tsa_state):
-    monkeypatch.setenv("ANYMATIX_C2PA_TSA", "http://127.0.0.1:9/")
-    path = str(tmp_path / "a.png")
-    formats.write_image(a_gradient(), path, extension="png")
-    assert_signed_untrusted(path, timestamped=False)
-    assert "timestamp authority unreachable" in capsys.readouterr().out
-
-    # Backed off: the next save does not even try.
-    def must_not_probe(*_args, **_kwargs):
-        raise AssertionError("the TSA was probed during the back-off")
-
-    monkeypatch.setattr(signing.socket, "create_connection", must_not_probe)
-    second = str(tmp_path / "b.png")
-    formats.write_image(a_gradient(), second, extension="png")
-    assert_signed_untrusted(second, timestamped=False)
-
-
-def test_a_tsa_that_drops_packets_is_given_up_on_quickly(tmp_path, monkeypatch, fresh_tsa_state):
+def test_signing_never_opens_a_connection(tmp_path, monkeypatch):
     """
-    Left to c2pa-rs, a TSA that drops packets costs 30 s and then the whole
-    signature (measured). The probe bounds it. 192.0.2.1 is TEST-NET-1
-    (RFC 5737): never routed.
+    No timestamp authority (decided 2026-10-17): a save is signed on the
+    machine and talks to nobody, and the signature carries no timestamp.
     """
-    monkeypatch.setenv("ANYMATIX_C2PA_TSA", "http://192.0.2.1/")
-    monkeypatch.setattr(signing, "TSA_PROBE_SECONDS", 0.5)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("signing attempted a network connection")
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
     path = str(tmp_path / "a.png")
-    started = time.monotonic()
     formats.write_image(a_gradient(), path, extension="png")
-    assert time.monotonic() - started < 3
-    assert_signed_untrusted(path, timestamped=False)
-
-
-def test_a_tsa_that_answers_with_an_error_costs_only_the_timestamp(
-    tmp_path, monkeypatch, capsys, fresh_tsa_state
-):
-    """Reachable by TCP, useless by HTTP: c2pa-rs fails, and the retry signs."""
-
-    class Refuses(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.send_response(500)
-            self.end_headers()
-
-        def log_message(self, *_args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Refuses)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        monkeypatch.setenv("ANYMATIX_C2PA_TSA", f"http://127.0.0.1:{server.server_port}/")
-        path = str(tmp_path / "a.png")
-        formats.write_image(a_gradient(), path, extension="png")
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert_signed_untrusted(path, timestamped=False)
-    assert "timestamp failed, signing without one" in capsys.readouterr().out
-
-
-def test_a_large_batch_is_never_timestamped(tmp_path, monkeypatch, fresh_tsa_state):
-    """`fast` is set for a batch of more than four: no TSA round-trip per frame."""
-    monkeypatch.setenv("ANYMATIX_C2PA_TSA", signing.TSA_URL)
-
-    def must_not_probe(_url):
-        raise AssertionError("a fast write asked for a timestamp")
-
-    monkeypatch.setattr(signing, "_tsa_reachable", must_not_probe)
-    path = str(tmp_path / "a.png")
-    formats.write_image(a_gradient(), path, extension="png", fast=True)
-    assert_signed_untrusted(path, timestamped=False)
+    assert_signed_untrusted(path)
+    assert signing.sign_bytes(open(path, "rb").read(), "png")
+    fast = str(tmp_path / "b.png")
+    formats.write_image(a_gradient(), fast, extension="png", fast=True)
+    assert_signed_untrusted(fast)
 
 
 # ------------------------------------------------------ failure is harmless ----

@@ -118,15 +118,14 @@ def write_image(
 
     The staged file is labelled as AI-generated before it is published
     (AI Act art. 50(2); `anymatix_ai_disclosure.py`), then signed with a
-    self-signed C2PA manifest (`anymatix_c2pa.py`) -- timestamped unless
-    `fast`, since a large batch would pay one TSA round-trip per frame. Both
+    self-signed C2PA manifest (`anymatix_c2pa.py`). Both
     are best-effort: they never fail the write and never alter the pixels.
     """
     temp_path = temp_path_for(path)
     try:
         _write_image_to(temp_path, image, extension, quality, lossless_webp, bit_depth, fast)
         mark_file(temp_path, extension)
-        sign_file(temp_path, extension, timestamp=not fast)
+        sign_file(temp_path, extension)
         publish(temp_path, path)
     except BaseException:
         cleanup_temp(temp_path)

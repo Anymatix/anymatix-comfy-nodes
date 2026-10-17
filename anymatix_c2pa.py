@@ -36,15 +36,12 @@ WHAT IS IN THE MANIFEST -- a module constant, like the label
   no user, no prompt, no card name: the file is signed from a stream, so
   c2pa-rs never sees a file name either. Disclosure, not surveillance.
 
-THE TIMESTAMP
+NO TIMESTAMP, ON PURPOSE
 
-  From a public TSA when reachable. Reachability is a TCP connect with a short
-  timeout, because c2pa-rs fails the whole signature when its TSA request
-  fails, and waits 30 s before it does when packets are dropped (measured).
-  Unreachable -> signed without a timestamp, and the TSA is not tried again
-  for `TSA_RETRY_AFTER_SECONDS`, so an offline machine pays the probe once,
-  not once per file. A caller writing a large batch passes `timestamp=False`:
-  one TSA round-trip per frame would add minutes to a sequence.
+  Decided 2026-10-17: the manifest is self-signed (untrusted) by design, so a
+  trusted timestamp would prove nothing more, art. 50(2) does not need one,
+  and asking a public authority costs a network request carrying the user's
+  address on every save. This module never opens a connection.
 
 WHAT IS NOT NEGOTIABLE HERE
 
@@ -65,9 +62,8 @@ WHAT IS NOT NEGOTIABLE HERE
   | bmp                 | no -- no metadata at all, not even the label     |
   | json (sidecars)     | exempt -- not media                              |
 
-  Environment overrides, for tests and for an operator who needs them:
-  `ANYMATIX_C2PA_DIR` (where the signing credential lives) and
-  `ANYMATIX_C2PA_TSA` (the TSA URL; empty = never timestamp).
+  Environment override, for tests and for an operator who needs it:
+  `ANYMATIX_C2PA_DIR` (where the signing credential lives).
 
 This module imports neither `comfy` nor `folder_paths`, and imports `c2pa`
 and `cryptography` only when it signs, so a missing wheel can never stop the
@@ -78,10 +74,7 @@ import datetime
 import io
 import json
 import os
-import socket
 import sys
-import time
-import urllib.parse
 
 try:
     from .anymatix_atomic_write import cleanup_temp, temp_path_for
@@ -139,10 +132,6 @@ MANIFEST = json.dumps(
 #: c2pa-rs settings for signing: no thumbnail.
 SETTINGS = {"builder": {"thumbnail": {"enabled": False}}}
 
-TSA_URL = "http://timestamp.digicert.com"
-TSA_PROBE_SECONDS = 3.0
-TSA_RETRY_AFTER_SECONDS = 600.0
-
 #: One file holds the signing key and its certificate chain, so the two can
 #: never disagree: it is replaced whole or not at all.
 CREDENTIAL_FILE = "anymatix-c2pa-signer.pem"
@@ -152,10 +141,6 @@ SIGNER_COMMON_NAME = "Anymatix self-signed content credentials (untrusted)"
 ORGANIZATION = "Anymatix"
 ROOT_YEARS = 20
 SIGNER_YEARS = 10
-
-#: monotonic time before which the TSA is not tried again.
-_tsa_unreachable_until = 0.0
-
 
 def _extension(extension):
     return extension.lower().lstrip(".")
@@ -359,66 +344,24 @@ def load_credential():
     return parse_credential(data)
 
 
-# ------------------------------------------------------------- the timestamp ----
-
-
-def _tsa_url():
-    return os.environ.get("ANYMATIX_C2PA_TSA", TSA_URL)
-
-
-def _tsa_reachable(url):
-    """A TCP connect to the TSA within `TSA_PROBE_SECONDS`."""
-    global _tsa_unreachable_until
-    if time.monotonic() < _tsa_unreachable_until:
-        return False
-    parts = urllib.parse.urlsplit(url)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    try:
-        socket.create_connection((parts.hostname, port), timeout=TSA_PROBE_SECONDS).close()
-        return True
-    except OSError as error:
-        _tsa_unreachable_until = time.monotonic() + TSA_RETRY_AFTER_SECONDS
-        print(f"anymatix: C2PA timestamp authority unreachable, signing without a timestamp: {error!r}")
-        return False
-
-
 # ------------------------------------------------------------------- signing ----
 
 
-def _sign(mime, source, dest, credential, tsa_url):
+def _sign(mime, source, dest):
     import c2pa
 
-    key_pem, chain_pem = credential
+    key_pem, chain_pem = load_credential()
     info = c2pa.C2paSignerInfo(
-        alg=b"es256", sign_cert=chain_pem, private_key=key_pem, ta_url=tsa_url
+        alg=b"es256", sign_cert=chain_pem, private_key=key_pem,
+        # c2pa-python requires the argument; None = no timestamp authority.
+        ta_url=None,
     )
     with c2pa.Signer.from_info(info) as signer, c2pa.Context.from_dict(SETTINGS) as context:
         with c2pa.Builder(MANIFEST, context=context) as builder:
             builder.sign(signer, mime, source, dest)
 
 
-def _sign_with_timestamp_if_possible(mime, source, dest, timestamp):
-    """
-    Sign `source` into `dest`, with a timestamp when one can be had. Both are
-    seekable binary streams; `dest` is rewound and truncated for a retry.
-    """
-    credential = load_credential()
-    url = _tsa_url() if timestamp else ""
-    if url and _tsa_reachable(url):
-        try:
-            _sign(mime, source, dest, credential, url)
-            return
-        except Exception as error:  # the timestamp is optional; the manifest is not
-            # Retried without the TSA, and only once: a failure that is not
-            # the TSA's fails the retry too, and is reported by the caller.
-            print(f"anymatix: C2PA timestamp failed, signing without one: {error!r}")
-            source.seek(0)
-            dest.seek(0)
-            dest.truncate()
-    _sign(mime, source, dest, credential, None)
-
-
-def sign_bytes(data, extension, timestamp=True):
+def sign_bytes(data, extension):
     """
     `data` with a C2PA manifest embedded, or `data` itself when the format
     cannot carry one or anything at all goes wrong. Never raises.
@@ -429,14 +372,14 @@ def sign_bytes(data, extension, timestamp=True):
         return data
     try:
         dest = io.BytesIO()
-        _sign_with_timestamp_if_possible(mime, io.BytesIO(bytes(data)), dest, timestamp)
+        _sign(mime, io.BytesIO(bytes(data)), dest)
         return dest.getvalue()
     except Exception as error:  # the manifest is best-effort; the output is not
         _not_signed(extension, error)
         return data
 
 
-def sign_file(path, extension, timestamp=True):
+def sign_file(path, extension):
     """
     Embed a C2PA manifest in the file at `path`, in place. True when it now
     carries one.
@@ -454,7 +397,7 @@ def sign_file(path, extension, timestamp=True):
     try:
         staged = temp_path_for(path)
         with open(path, "rb") as source, open(staged, "w+b") as dest:
-            _sign_with_timestamp_if_possible(mime, source, dest, timestamp)
+            _sign(mime, source, dest)
             dest.flush()
         os.replace(staged, path)
         staged = None
