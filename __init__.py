@@ -68,6 +68,7 @@ anymatix_mps_fp8.register()
 # Whose heartbeat answered: every answer names the port this ComfyUI was
 # launched on, and a heartbeat meant for another one is never obeyed.
 from .anymatix_heartbeat_identity import heartbeat_reply, meant_for_another, side_channel_handler
+from .anymatix_state_dir import lifecycle_journal_path
 from comfy.cli_args import args as comfy_args
 
 NODE_CLASS_MAPPINGS = {
@@ -318,18 +319,14 @@ def _lifecycle_journal_path() -> str:
     at all, so "the stop was refused" and "the stop was never attempted" looked
     identical from outside.
 
-    `/workspace` is the network volume: it survives a container restart AND a
-    pod stop, which is exactly the span this file has to bridge. Falling back
-    to the install dir keeps local runs working, where nothing is lost anyway.
+    The directory is the bootstrap's to choose (`ANYMATIX_STATE_DIR`; on a pod
+    it is `/workspace/.anymatix`, the network volume, which survives a
+    container restart AND a pod stop, exactly the span this file has to
+    bridge). It is never derived from this file's location: that is the ComfyUI
+    git checkout, and a journal in it made every boot reset ComfyUI. See
+    anymatix_state_dir.py.
     """
-    for base in ("/workspace", os.path.dirname(os.path.dirname(os.path.dirname(__file__)))):
-        try:
-            d = os.path.join(base, ".anymatix")
-            os.makedirs(d, exist_ok=True)
-            return os.path.join(d, "lifecycle.jsonl")
-        except Exception:
-            continue
-    return ""
+    return lifecycle_journal_path()
 
 
 def _journal(event: str, **fields) -> None:
