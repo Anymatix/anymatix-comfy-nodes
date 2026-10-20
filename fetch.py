@@ -1310,10 +1310,19 @@ class AsyncParallelDownloader:
                 sock_read=DOWNLOAD_STALL_SECONDS,
             )
             
+            # THE PERSON'S PROXY, LIKE EVERY OTHER REQUEST THIS FILE MAKES.
+            # aiohttp's `trust_env` defaults to False, while `requests` (the
+            # header probe and the single-stream fallback) defaults to True.
+            # So behind a proxy-only network the probe went through the proxy
+            # and the gigabytes tried to go straight out
+            # (`bugs/the-model-fetcher-ignores-http-s-proxy`). `trust_env`
+            # reads HTTP_PROXY / HTTPS_PROXY / NO_PROXY (and ~/.netrc, as
+            # `requests` does).
             async with aiohttp.ClientSession(
                 connector=connector,
                 timeout=timeout,
-                headers={'User-Agent': 'AnymatixFetcher/2.0 (Parallel)'}
+                headers={'User-Agent': 'AnymatixFetcher/2.0 (Parallel)'},
+                trust_env=True
             ) as session:
                 
                 def progress_update(bytes_read):
