@@ -47,6 +47,11 @@ try:
     from .anymatix_credentials import civitai_auth_tail, redact_secrets, secrets_redacted, strip_url_token
 except Exception:
     from anymatix_credentials import civitai_auth_tail, redact_secrets, secrets_redacted, strip_url_token
+try:
+    from . import anymatix_prefetch
+except ImportError:
+    import anymatix_prefetch
+from comfy.model_management import throw_exception_if_processing_interrupted
 from spandrel import ModelLoader, ImageModelDescriptor
 from nodes import CLIPLoader, UNETLoader, VAELoader, CLIPVisionLoader, LoraLoaderModelOnly, DualCLIPLoader, ControlNetLoader
 
@@ -493,8 +498,72 @@ def _sidecars_for_model(dir_path: str, model_basename: str) -> list:
 
 FETCH_PHASES = ("fetching", "verifying", "adopting")
 
+def _progress_bar(phases_reported: bool):
+    """ComfyUI's bar for a fetch inside a prompt; for a prefetch, not ComfyUI's.
+
+    ComfyUI's bar hook checks ComfyUI's ONE interrupt flag on every tick, and
+    reading it clears it (`fetch.own_interrupt_check` says why a prefetch must
+    never do that), and it labels its message with the LAST prompt that ran.
+    So a prefetch's bar has no ComfyUI hook. Where the branch already sends
+    `anymatix.fetch_phase` with every number (`phases_reported`), the bar says
+    nothing more; where it does not (a Chatterbox pack, an annotator weight),
+    the bar's ticks are sent as `fetching` phases, so the app still sees the
+    download move.
+    """
+    bar = comfy.utils.ProgressBar(1000)
+    if anymatix_prefetch.current() is None:
+        return bar
+    if phases_reported:
+        bar.hook = None
+    else:
+        send = _phase_sender()
+        bar.hook = lambda value, total, preview=None, node_id=None: send("fetching", value, total)
+    return bar
+
+
+def _wait_for_running_prefetch(url: dict) -> None:
+    """A fetcher node whose file a prefetch is downloading WAITS for it.
+
+    Two writers of one part file corrupt it. Only a node waits: a prefetch
+    of the same file never starts twice (`anymatix_prefetch.start` joins it).
+    The node's own Stop still reaches it, through ComfyUI's flag, which on the
+    node's thread is the right one to ask.
+    """
+    if anymatix_prefetch.current() is not None:
+        return
+    key = anymatix_prefetch.prefetch_key(url, strip_url_token)
+    if anymatix_prefetch.wait_for_key(key, throw_exception_if_processing_interrupted):
+        print(f"[ANYMATIX] waited for the download already running for this model")
+
+
 
 def _send_fetch_phase(phase: str, value: int, maximum: int) -> None:
+    _phase_sender()(phase, value, maximum)
+
+
+def _phase_sender():
+    """`_send_fetch_phase`, with WHO IS ASKING read once, now.
+
+    The fetch reports from more than one thread (the parallel download runs
+    its own loop on a thread of its own), and the executing context ComfyUI
+    keeps is per thread: read at call time from a worker, it is empty and the
+    message is dropped. So the node reads it on its own thread, at the start,
+    and the returned function carries it. A prefetch (`anymatix_prefetch.py`)
+    is the other caller: its messages carry the prefetch's id as `prompt_id`,
+    which is what the app's dispatcher routes them by.
+    """
+    prefetch = anymatix_prefetch.current()
+    context = None if prefetch is not None else get_executing_context()
+    node_id = "prefetch" if prefetch is not None else (getattr(context, "node_id", None) if context else None)
+    prompt_id = prefetch.id if prefetch is not None else (getattr(context, "prompt_id", None) if context else None)
+
+    def send(phase: str, value: int, maximum: int) -> None:
+        _send_phase_message(node_id, prompt_id, phase, value, maximum)
+
+    return send
+
+
+def _send_phase_message(node_id, prompt_id, phase: str, value: int, maximum: int) -> None:
     """Tell the app WHAT the bar is measuring, in the same message as the number.
 
     ComfyUI's `progress` message carries value, max and node, and has no room
@@ -517,12 +586,7 @@ def _send_fetch_phase(phase: str, value: int, maximum: int) -> None:
     instance = getattr(PromptServer, "instance", None)
     if instance is None:
         return
-    context = get_executing_context()
-    message = fetch_phase_message(
-        getattr(context, "node_id", None) if context else None,
-        getattr(context, "prompt_id", None) if context else None,
-        phase, value, maximum,
-    )
+    message = fetch_phase_message(node_id, prompt_id, phase, value, maximum)
     if message is None:
         return
     instance.send_sync("anymatix.fetch_phase", message)
@@ -1411,8 +1475,9 @@ class AnymatixFetcher:
             print("download model", type(url), {k: v for k, v in url.items() if k in ("url", "type")})
         except Exception:
             pass
+        _wait_for_running_prefetch(url)
         if url.get("type") in CHATTERBOX_PACKS:
-            pbar_cb = comfy.utils.ProgressBar(1000)
+            pbar_cb = _progress_bar(phases_reported=False)
             prog = 0
             pbar_cb.update_absolute(prog, 1000)
 
@@ -1442,7 +1507,7 @@ class AnymatixFetcher:
             dest = _destination_path_for_dwpose_aux_url(
                 effective, root, nested=url.get("type") in _AUX_HF_LAYOUT_TYPES
             )
-            pbar = comfy.utils.ProgressBar(1000)
+            pbar = _progress_bar(phases_reported=False)
             prog_holder = [0]
 
             def callback(x, y):
@@ -1461,7 +1526,8 @@ class AnymatixFetcher:
 
         if url["type"] in dirmap:
             dir = get_anymatix_models_dir(dirmap[url["type"]])
-            pbar = comfy.utils.ProgressBar(1000)
+            pbar = _progress_bar(phases_reported=True)
+            send_phase = _phase_sender()
             progress = 0
             phase_name = "fetching"
             pbar.update_absolute(progress, 1000)
@@ -1566,7 +1632,7 @@ class AnymatixFetcher:
                 phase_name = name
                 progress = 1000 if name == "adopting" else 0
                 pbar.update_absolute(progress, 1000)
-                _send_fetch_phase(name, progress, 1000)
+                send_phase(name, progress, 1000)
 
             def callback(x, y):
                 if y is None or y <= 0:
@@ -1577,7 +1643,7 @@ class AnymatixFetcher:
                 if new_progress != progress:
                     progress = new_progress
                     pbar.update_absolute(progress, 1000)
-                    _send_fetch_phase(phase_name, progress, 1000)
+                    send_phase(phase_name, progress, 1000)
 
             try:
                 # NVMe-first: bytes land on local disk and the run starts from

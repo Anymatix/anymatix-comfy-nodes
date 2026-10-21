@@ -16,7 +16,8 @@ import threading
 from server import PromptServer
 import app
 from .fetch import pick_durable_dir
-from .anymatix_credentials import has_civitai_token, set_civitai_token
+from .anymatix_credentials import has_civitai_token, redact_secrets, set_civitai_token, strip_url_token
+from . import anymatix_prefetch
 
 from .anymatix_checkpoint_fetcher import (
     # AnymatixCheckpointFetcher,
@@ -614,6 +615,72 @@ async def receive_credentials(request):
         return web.json_response({"status": "error", "error": "body is not JSON"}, status=400)
     set_civitai_token(data.get("civitai") if isinstance(data, dict) else None)
     return web.json_response({"status": "ok", "civitai": has_civitai_token()})
+
+
+@routes.post("/anymatix/prefetch")
+async def serve_prefetch(request):
+    """Download one model OUTSIDE the prompt queue (`anymatix_prefetch.py`).
+
+    Body `{"url": {"url": ..., "type": ...}, "id": "<client-chosen id>"}` --
+    the same `url` input an `AnymatixFetcher` node takes. Answers at once with
+    the prefetch's id and whether it JOINED a download of the same file that
+    was already running (then the id is that one's, not the one asked for).
+    Progress arrives on the websocket as `anymatix.fetch_phase` with that id
+    as `prompt_id`; the end as `anymatix.prefetch_done`. Same trust as every
+    other route on this port: none of its own (KB security audit, the auth
+    decision for the ComfyUI port).
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"status": "error", "error": "body is not JSON"}, status=400)
+    url = data.get("url") if isinstance(data, dict) else None
+    if not isinstance(url, dict) or not isinstance(url.get("url"), str) or not isinstance(url.get("type"), str):
+        return web.json_response({"status": "error", "error": "'url' must be {url, type}"}, status=400)
+    wanted = data.get("id")
+    wanted = wanted if isinstance(wanted, str) and 0 < len(wanted) <= 128 else None
+    url = {"url": url["url"], "type": url["type"]}
+    server = PromptServer.instance
+
+    def on_end(p):
+        message = {"prompt_id": p.id, "state": p.state}
+        if p.error is not None:
+            p.error = redact_secrets(p.error)
+            message["error"] = p.error
+        print(f"[ANYMATIX PREFETCH] {p.id} {p.state}")
+        server.send_sync("anymatix.prefetch_done", message)
+
+    p, joined = anymatix_prefetch.start(
+        url,
+        lambda u: AnymatixFetcher().download_model(u),
+        on_end,
+        anymatix_prefetch.prefetch_key(url, strip_url_token),
+        wanted,
+    )
+    print(f"[ANYMATIX PREFETCH] {p.id} {'joined' if joined else 'started'} type={url['type']}")
+    return web.json_response({"status": "ok", "id": p.id, "joined": joined})
+
+
+@routes.post("/anymatix/prefetch/cancel")
+async def serve_prefetch_cancel(request):
+    """Stop one prefetch. Its part file stays: asking again resumes it."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"status": "error", "error": "body is not JSON"}, status=400)
+    pid = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(pid, str):
+        return web.json_response({"status": "error", "error": "'id' must be a string"}, status=400)
+    return web.json_response({"status": "ok", "cancelled": anymatix_prefetch.cancel(pid)})
+
+
+@routes.get("/anymatix/prefetch/{pid}")
+async def serve_prefetch_status(request):
+    """How one prefetch stands: running, done, failed or cancelled."""
+    found = anymatix_prefetch.status(request.match_info["pid"])
+    if found is None:
+        return web.json_response({"status": "error", "error": "no such prefetch"}, status=404)
+    return web.json_response({"status": "ok", **found})
 
 
 @routes.post('/anymatix/heartbeat')

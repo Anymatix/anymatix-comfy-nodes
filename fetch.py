@@ -17,12 +17,64 @@ except ImportError:
 # Import ComfyUI's interrupt checking if available
 try:
     import comfy.model_management
-    def check_interrupted():
+    def _comfy_check_interrupted():
         comfy.model_management.throw_exception_if_processing_interrupted()
 except ImportError:
     # Fallback for standalone execution
-    def check_interrupted():
+    def _comfy_check_interrupted():
         pass
+
+import threading as _threading
+
+
+class PrefetchCancelled(Exception):
+    """The Stop of a download that runs OUTSIDE a prompt (`anymatix_prefetch.py`).
+
+    It travels up the way ComfyUI's interrupt does (`is_interrupt`): never
+    retried, never wrapped, and the part file and its journal stay for a resume.
+    """
+
+
+# A DOWNLOAD OUTSIDE A PROMPT HAS ITS OWN STOP, AND MUST NOT TOUCH THE PROMPT'S.
+#
+# ComfyUI's interrupt is ONE process-wide flag, and reading it CLEARS it. A
+# model download run beside a prompt (`anymatix_prefetch.py`) that asked it
+# would do two wrong things at once: a Stop pressed on the card that is
+# generating would end the download of a different card, and the download
+# would swallow that Stop, so the generation went on. So a thread that is
+# downloading for a prefetch registers its own check here, and every check in
+# this module asks for the current thread's first.
+_thread_interrupt_checks: dict = {}
+
+
+class own_interrupt_check:
+    """Context manager: while inside, `check_interrupted` on THIS thread calls
+    `check` instead of ComfyUI's flag."""
+
+    def __init__(self, check: "Callable[[], None]"):
+        self.check = check
+
+    def __enter__(self):
+        _thread_interrupt_checks[_threading.get_ident()] = self.check
+        return self
+
+    def __exit__(self, *exc):
+        _thread_interrupt_checks.pop(_threading.get_ident(), None)
+        return False
+
+
+def current_interrupt_check() -> "Callable[[], None]":
+    """The check that applies to the calling thread, for code that will run the
+    check on OTHER threads (a pool of segment workers) on its behalf."""
+    return _thread_interrupt_checks.get(_threading.get_ident()) or _comfy_check_interrupted
+
+
+def check_interrupted():
+    own = _thread_interrupt_checks.get(_threading.get_ident())
+    if own is not None:
+        own()
+        return
+    _comfy_check_interrupted()
 
 import hashlib
 import json
@@ -147,8 +199,9 @@ def retry_pause_seconds(attempt: int) -> float:
 
 def is_interrupt(e: BaseException) -> bool:
     """ComfyUI's Stop, which must travel up untouched: never retried, never
-    wrapped into a download error the caller would fall back from."""
-    return "InterruptProcessingException" in type(e).__name__
+    wrapped into a download error the caller would fall back from. A
+    prefetch's own Stop is the same kind of fact."""
+    return isinstance(e, PrefetchCancelled) or "InterruptProcessingException" in type(e).__name__
 
 
 def describe_transport_error(e: BaseException) -> str:
@@ -735,6 +788,10 @@ class SegmentDownloader:
         self.segment_size = segment_size
         self.downloaded_bytes = 0
         self.lock = threading.Lock()
+        # Taken HERE, on the thread that owns the download: the segment
+        # workers are pool threads, and asking ComfyUI's flag from them would
+        # let a prefetch steal a prompt's Stop (`own_interrupt_check`).
+        self.check_interrupted = current_interrupt_check()
         self.segments = []
         self.active_segments = {}
         self.failed_segments = []
@@ -782,8 +839,8 @@ class SegmentDownloader:
                         
                     segment_data = b''
                     for chunk in response.iter_content(chunk_size=8192):
-                        # Check for ComfyUI interrupt signal
-                        check_interrupted()
+                        # Check for ComfyUI interrupt signal (or the prefetch's own)
+                        self.check_interrupted()
                         if chunk:
                             segment_data += chunk
                             chunk_size = len(chunk)
