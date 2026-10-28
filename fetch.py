@@ -24,6 +24,11 @@ except ImportError:
     def _comfy_check_interrupted():
         pass
 
+try:
+    from comfy.model_management import InterruptProcessingException as _ComfyInterrupt
+except Exception:
+    _ComfyInterrupt = None
+
 import threading as _threading
 
 
@@ -200,8 +205,17 @@ def retry_pause_seconds(attempt: int) -> float:
 def is_interrupt(e: BaseException) -> bool:
     """ComfyUI's Stop, which must travel up untouched: never retried, never
     wrapped into a download error the caller would fall back from. A
-    prefetch's own Stop is the same kind of fact."""
-    return isinstance(e, PrefetchCancelled) or "InterruptProcessingException" in type(e).__name__
+    prefetch's own Stop is the same kind of fact.
+
+    ComfyUI's class is `comfy.model_management.InterruptProcessingException`:
+    a `BaseException` since ComfyUI #13523 (the pinned one), an `Exception`
+    before it, so an `except Exception` only lets it through on new ComfyUIs.
+    Matched by class when ComfyUI is importable, and by name otherwise."""
+    if isinstance(e, PrefetchCancelled):
+        return True
+    if _ComfyInterrupt is not None and isinstance(e, _ComfyInterrupt):
+        return True
+    return "InterruptProcessingException" in type(e).__name__
 
 
 def describe_transport_error(e: BaseException) -> str:
@@ -1223,22 +1237,47 @@ async def fetch_async_segment(session, url: str, start: int, end: int,
             await f.seek(start)
             position = start
             unrecorded = 0
-            async for chunk in response.content.iter_chunked(8192):
-                if position + len(chunk) > end + 1:
-                    raise RangeNotHonoured(
-                        f"segment {segment_id} received more than its {end - start + 1} bytes"
-                    )
-                await f.write(chunk)
-                position += len(chunk)
-                unrecorded += len(chunk)
-                if reached is not None:
-                    reached[segment_id] = position
-                if progress_callback:
-                    progress_callback(len(chunk))
-                if on_landed and unrecorded >= SEGMENT_JOURNAL_STRIDE:
-                    await f.flush()
-                    on_landed(segment_id, position)
-                    unrecorded = 0
+            try:
+                async for chunk in response.content.iter_chunked(8192):
+                    if position + len(chunk) > end + 1:
+                        raise RangeNotHonoured(
+                            f"segment {segment_id} received more than its {end - start + 1} bytes"
+                        )
+                    await f.write(chunk)
+                    position += len(chunk)
+                    unrecorded += len(chunk)
+                    if reached is not None:
+                        reached[segment_id] = position
+                    if progress_callback:
+                        progress_callback(len(chunk))
+                    if on_landed and unrecorded >= SEGMENT_JOURNAL_STRIDE:
+                        await f.flush()
+                        on_landed(segment_id, position)
+                        unrecorded = 0
+            except BaseException:
+                # THE LAST BYTE IS JOURNALLED ON EVERY WAY OUT, NOT JUST THE
+                # END. A Stop (ComfyUI's, or a prefetch's own) cancels this
+                # task mid-stream, and so does a link that dies; leaving here
+                # with only the last stride recorded made the resume fetch up
+                # to `SEGMENT_JOURNAL_STRIDE` of every segment again — 32 MiB
+                # x 8 segments = up to 256 MiB per file, measured at 124M and
+                # 151M on 7-9 GB weights
+                # (`bugs/a-paused-download-re-fetches-up-256-mib`, app repo).
+                #
+                # FLUSH FIRST, THEN JOURNAL, AND JOURNAL NOTHING IF THE FLUSH
+                # FAILED: the journal must never claim a byte that is not in
+                # the kernel. `position` only moves after a write returned, so
+                # a write a cancel interrupted is under-claimed, never over.
+                # Best effort: the exception being raised is the news.
+                if on_landed:
+                    try:
+                        await f.flush()
+                    except BaseException as flush_error:  # cancelled again, disk gone
+                        print(f"[ANYMATIX DOWNLOAD] Segment {segment_id} not journalled at "
+                              f"byte {position}: the flush failed ({flush_error!r})")
+                    else:
+                        on_landed(segment_id, position)
+                raise
             await f.flush()
             if on_landed:
                 on_landed(segment_id, position)

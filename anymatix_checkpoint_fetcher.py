@@ -25,6 +25,7 @@ try:
         download_file,
         fetch_phase_message,
         hash_string,
+        is_interrupt,
         is_under_nvme_cache,
         pick_durable_dir,
         satisfied_locally,
@@ -36,6 +37,7 @@ except Exception:
             download_file,
             fetch_phase_message,
             hash_string,
+            is_interrupt,
             is_under_nvme_cache,
             pick_durable_dir,
             satisfied_locally,
@@ -1136,6 +1138,8 @@ class AnymatixCheckpointFetcher:
             )
             return (model_name,)
         except Exception as e:
+            if is_interrupt(e):
+                raise
             # Enhance error message with context for better debugging
             error_msg = f"AnymatixCheckpointFetcher failed to download from {base_url}: {e}"
             print(f"[ANYMATIX ERROR] {error_msg}")
@@ -1669,8 +1673,10 @@ class AnymatixFetcher:
                         adopt_dirs=[dir] if cache_dir else None,
                         phase=set_phase,
                     )
-                except Exception:
-                    if not cache_dir:
+                except Exception as e:
+                    # A Stop is not a cache-disk problem: retrying against the
+                    # durable dir would start the download it just stopped.
+                    if not cache_dir or is_interrupt(e):
                         raise
                     # Whatever went wrong on the cache disk (full, gone, odd),
                     # the durable dir is the behaviour that always worked.
@@ -1703,6 +1709,14 @@ class AnymatixFetcher:
                 print("fetched model", model_name)
                 return (model_name,)
             except Exception as e:
+                # A STOP IS NOT A FAILED DOWNLOAD. A prefetch's own Stop
+                # (`PrefetchCancelled`) and ComfyUI's interrupt travel up
+                # unwrapped, so `anymatix_prefetch` ends `cancelled` and a run
+                # ends `interrupted`. Rewrapped into "Failed to download ..."
+                # both read as failures, and the part file looked abandoned
+                # (`bugs/a-paused-download-re-fetches-up-256-mib`, app repo).
+                if is_interrupt(e):
+                    raise
                 # Enhance error message with context for better debugging
                 model_type = url.get("type", "unknown")
                 
