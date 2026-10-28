@@ -1547,10 +1547,9 @@ class AnymatixFetcher:
                     "Import the file via Anymatix (Add Model) or add the hash-named file under assets/models."
                 )
 
-            # THE EFFECTIVE URL IS NEEDED BEFORE THE DEDUPLICATION CHECK, not
-            # only by the download: it is what the sidecar is named after, so
-            # without it the check below cannot tell whether this url is
-            # already satisfied. Computed once, here.
+            # The effective url (base plus the Civitai auth tail) is for the
+            # REQUEST only. The sidecar is named after the base url, so the
+            # key is never part of a weight's identity (fetch.download_file).
             if auth is not None and len(auth) > 0:
                 # Robustly append query parameters using urllib
                 p = urlparse(base_url)
@@ -1575,7 +1574,7 @@ class AnymatixFetcher:
             # by the sha256 Civitai states, which is the same hash
             # `adopt_existing_file` matches on inside `download_file`.
             already_here = satisfied_locally(
-                [dir, _nvme_cache_twin(dir)], [base_url, effective]
+                [dir, _nvme_cache_twin(dir)], [base_url]
             )
 
             # PRE-DOWNLOAD DEDUPLICATION CHECK
@@ -1651,9 +1650,8 @@ class AnymatixFetcher:
                 # durable. A url whose sidecar already sits on the volume is
                 # durable already, so it takes the old path — download_file
                 # then finds the file and downloads nothing.
-                durable_has_sidecar = any(
-                    h and os.path.isfile(os.path.join(dir, f"{h}.json"))
-                    for h in {hash_string(base_url or ""), hash_string(effective or "")}
+                durable_has_sidecar = os.path.isfile(
+                    os.path.join(dir, f"{hash_string(base_url or '')}.json")
                 )
                 cache_dir = None if durable_has_sidecar else _nvme_cache_dir_for(dir)
                 try:
@@ -1801,7 +1799,7 @@ class AnymatixFetcher:
                 effective, root, nested=url.get("type") in _AUX_HF_LAYOUT_TYPES
             )
                 if os.path.isfile(dest):
-                    return hash_string(effective)
+                    return hash_string(base_url)
             except Exception:
                 pass
             return float("NaN")
@@ -1818,17 +1816,9 @@ class AnymatixFetcher:
                 return hash_string(base_url or "")
             return float("NaN")
 
-        auth = civitai_auth_tail(base_url)
-        if auth is not None and len(auth) > 0:
-            p = urlparse(base_url)
-            existing = parse_qsl(p.query, keep_blank_values=True)
-            to_add = parse_qsl(auth, keep_blank_values=True)
-            new_query = urlencode(existing + to_add)
-            effective = urlunparse(p._replace(query=new_query))
-        else:
-            effective = base_url
-        
-        url_hash = hash_string(effective)
+        # The base url, never the effective one: the sidecar is named after
+        # it, and a key that changes must not make a present weight look new.
+        url_hash = hash_string(base_url or "")
         dir_path = get_anymatix_models_dir(dirmap[url["type"]])
         json_path = os.path.join(dir_path, f"{url_hash}.json")
 

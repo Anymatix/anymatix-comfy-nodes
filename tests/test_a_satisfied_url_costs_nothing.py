@@ -340,9 +340,9 @@ def test_a_url_already_on_disk_is_recognised_without_a_request():
         assert fetch.satisfied_locally([d], [CIVITAI]) == os.path.join(d, name)
 
 
-def test_the_sidecar_is_found_under_the_effective_url_too():
-    # A credentialled url is what the sidecar is NAMED after; the base url is
-    # what it stores. A caller that knows only one of the two must still find it.
+def test_a_sidecar_named_after_the_credentialled_url_is_found_by_the_base_url():
+    # Before 2026-10-28 a credentialled url is what the sidecar was NAMED
+    # after; the base url is what it stores, and the base url alone finds it.
     payload = b"a civitai lora" * 50
     sha = hashlib.sha256(payload).hexdigest()
 
@@ -353,8 +353,7 @@ def test_the_sidecar_is_found_under_the_effective_url_too():
             json.dump({"url": CIVITAI, "file_name": name,
                        "file_size": len(payload), "sha256": sha}, f)
 
-        assert fetch.satisfied_locally([d], [CIVITAI]) is None
-        assert fetch.satisfied_locally([d], [CIVITAI, CIVITAI_AUTHED]) == os.path.join(d, name)
+        assert fetch.satisfied_locally([d], [CIVITAI]) == os.path.join(d, name)
 
 
 def test_a_url_whose_file_is_short_is_not_satisfied():

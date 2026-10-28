@@ -644,9 +644,10 @@ def satisfied_locally(dirs, urls) -> Optional[str]:
     so skipping it when the url is already satisfied loses nothing and is the
     difference between a card that runs offline and one that hangs first.
 
-    Several urls because the sidecar is named after the EFFECTIVE url (base
-    plus any auth tail) and the base url is what gets persisted; several dirs
-    because on a pod the bytes may be on the volume or in the NVMe cache.
+    Several dirs because on a pod the bytes may be on the volume or in the
+    NVMe cache. The sidecar is named after the url WITHOUT credentials (see
+    `download_file`); when no sidecar carries that name, one that RECORDS the
+    url still answers (`sidecar_recording`).
     """
     for d in dirs:
         if not d or not os.path.isdir(d):
@@ -660,6 +661,51 @@ def satisfied_locally(dirs, urls) -> Optional[str]:
             hit = satisfied_by_sidecar(d, data)
             if hit:
                 return hit
+    for u in urls:
+        found = sidecar_recording(dirs, u)
+        if found:
+            return found[2]
+    return None
+
+
+def sidecar_recording(dirs, url: str, skip: Optional[str] = None):
+    """A sidecar in `dirs` that STORES `url` and whose model is on disk, as
+    `(sidecar path, data, model path)` — or None. `skip` is a sidecar path not
+    to return (the caller's own, already found wanting).
+
+    THE CIVITAI KEY USED TO BE PART OF A WEIGHT'S IDENTITY. Until 2026-10-28
+    `download_file` named the sidecar `sha256(effective url)`, and the
+    effective url of a Civitai download carries `token=<key>`. So the same
+    weight was another url to the machine whenever the key changed, was added
+    or was removed: measured on fmt-5000 (2026-10-20), a keyless run of Flux
+    1.S refused a 17 GB checkpoint that was on disk under the sidecar a keyed
+    run had written, went to the network, and got 401.
+
+    Sidecars are named after the base url now, but every one written before
+    still carries the old name, and only its stored `url` — always the base,
+    never the credentialled one — says whose it is. A scan of the sidecars,
+    which costs a directory listing and only runs when the sidecar this url is
+    named by is missing or wanting.
+    """
+    if not url:
+        return None
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(f for f in os.listdir(d) if f.endswith(".json"))
+        except OSError:
+            continue
+        for f in names:
+            path = os.path.join(d, f)
+            if skip and os.path.abspath(path) == os.path.abspath(skip):
+                continue
+            data = read_sidecar(path)
+            if not isinstance(data, dict) or data.get("url") != url:
+                continue
+            hit = satisfied_by_sidecar(d, data)
+            if hit:
+                return path, data, hit
     return None
 
 
@@ -1801,9 +1847,9 @@ def fetch_parallel(url: str, file_path: str, callback: Optional[Callable[[int, O
 def sidecar_url_matches(stored_url, url: str) -> bool:
     """Whether a sidecar's stored base url is the url being deleted.
 
-    `download_file` persists the BASE url and names the sidecar after the
-    EFFECTIVE one (base plus any auth tail), so the two are not interchangeable
-    and a credentialled url is recognised by prefix.
+    `download_file` persists the BASE url; sidecars written before 2026-10-28
+    are named after the EFFECTIVE one (base plus any auth tail), and the url
+    being deleted may itself be credentialled, so it is recognised by prefix.
     """
     if not isinstance(stored_url, str) or not stored_url:
         return False
@@ -2280,7 +2326,15 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
     effective = effective_url or url
     print("download file", redact_url(effective, redact_append), dir)
-    url_hash = hash_string(effective)
+    # THE SIDECAR IS NAMED AFTER THE URL, NEVER AFTER ITS CREDENTIALS.
+    #
+    # `url` is the base url, the one persisted in the sidecar; `effective` adds
+    # the auth tail and is for the request alone. Naming the sidecar after
+    # `effective` made the Civitai key part of a weight's identity: a key
+    # added, changed or removed meant every Civitai weight on disk was another
+    # url to this machine, downloaded again — or, with no key, refused with a
+    # 401 although the bytes were present (`sidecar_recording`).
+    url_hash = hash_string(url)
     os.makedirs(dir, exist_ok=True)
     store_path = os.path.join(dir, f"{url_hash}.json")
 
@@ -2313,6 +2367,29 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                 print(f"[ANYMATIX] {os.path.basename(satisfied)} is already here, "
                       f"recorded for url hash {url_hash}: nothing to fetch")
                 return satisfied
+
+    # A SIDECAR THAT RECORDS THIS URL UNDER ANOTHER NAME — one written while
+    # the name still carried the Civitai key. It is renamed to the one this url
+    # is looked up by, so the scan is paid once and the next run is a `stat`.
+    own = read_sidecar(store_path) if os.path.exists(store_path) else None
+    if not (own and satisfied_by_sidecar(dir, own)):
+        found = sidecar_recording([dir] + list(adopt_dirs or []), url, skip=store_path)
+        if found:
+            old_sidecar, recorded, satisfied = found
+            renamed = os.path.join(os.path.dirname(old_sidecar), f"{url_hash}.json")
+            tmp = renamed + ".tmp"
+            with open(tmp, 'w') as file:
+                json.dump(recorded, file, indent=4)
+            os.replace(tmp, renamed)
+            os.remove(old_sidecar)
+            if os.path.abspath(renamed) != os.path.abspath(store_path) and os.path.exists(store_path):
+                # Ours, and it names nothing that is here: the record above
+                # is the one that does.
+                os.remove(store_path)
+            print(f"[ANYMATIX] {os.path.basename(satisfied)} is already here, recorded "
+                  f"for this url under {os.path.basename(old_sidecar)}: renamed to "
+                  f"url hash {url_hash}, nothing to fetch")
+            return satisfied
 
     parsed_url = urlparse(effective)
     file_name_default = parsed_url.path.split('/')[-1].split('?')[0]
