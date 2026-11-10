@@ -131,7 +131,7 @@ except ImportError:
         def __exit__(self, *args):
             pass
 
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
 
 
 # A STALLED DOWNLOAD IS DETECTED, RETRIED FROM WHERE IT STOPPED, AND ONLY THEN
@@ -761,24 +761,229 @@ def redact_url(u: str, appended: Optional[str] = None) -> str:
         return u
 
 
+# A WEIGHT WITH NO EXTENSION IS LOADED AS A PICKLE.
+#
+# ComfyUI's `load_torch_file` picks its loader by the file's extension:
+# `.safetensors`/`.sft` go to safetensors, anything else to
+# `torch.load(weights_only=True)`. A Civitai LoRA saved as
+# `3417654_<sha256>` (sleipnir, 2026-11-08, and again 2026-11-10) is a valid
+# safetensors file whose 8-byte little-endian header length is then read as
+# pickle opcodes: "Weights only load failed ... Unsupported operand 165" (and
+# 240 on the second file). The name is the only thing that was wrong.
+_DISPOSITION_PARAM_RE = re.compile(
+    r';\s*([^\s=;]+)\s*=\s*("(?:[^"\\]|\\.)*"|[^;]*)')
+_EXTENSION_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
+
+
+def _safe_basename(name) -> Optional[str]:
+    """`name` reduced to a bare file name we may create, or None.
+
+    A server chooses this string, so it may carry a directory (`../x`, a
+    Windows `C:\\x`) or control characters; only the last path component is
+    ever kept.
+    """
+    if not name:
+        return None
+    text = "".join(ch for ch in str(name) if ch >= " " and ch != "\x7f")
+    text = text.replace("\\", "/").rsplit("/", 1)[-1].strip().strip(".").strip()
+    if not text or text in (".", ".."):
+        return None
+    return text
+
+
+def filename_from_content_disposition(value) -> Optional[str]:
+    """The file name a `Content-Disposition` header states, in any of its forms.
+
+        attachment; filename="name.safetensors"
+        attachment; filename=name.safetensors
+        attachment; filename*=UTF-8''na%C3%AFve.safetensors
+        attachment; filename="fallback.bin"; filename*=UTF-8''real.safetensors
+
+    `filename*` (RFC 6266 / RFC 5987) wins over `filename` when both are
+    present, as the RFC says. The regex this replaces, `filename="(.+)"`, read
+    only the first form: an unquoted name or a `filename*` alone gave None, and
+    a header carrying both forms gave `fallback.bin"; filename*=UTF-8''...`,
+    because `.+` is greedy.
+    """
+    if not value:
+        return None
+    plain = None
+    extended = None
+    for key, raw in _DISPOSITION_PARAM_RE.findall(";" + str(value)):
+        key = key.lower()
+        raw = raw.strip()
+        if key == "filename*":
+            if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+                raw = raw[1:-1]
+            charset, _, rest = raw.partition("'")
+            _lang, _, encoded = rest.partition("'")
+            if not _:
+                # Not `charset'lang'value`: take it as it is.
+                encoded, charset = raw, ""
+            try:
+                extended = unquote(encoded, encoding=charset or "utf-8", errors="replace")
+            except LookupError:
+                extended = unquote(encoded, encoding="utf-8", errors="replace")
+        elif key == "filename":
+            if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+                raw = re.sub(r'\\(.)', r'\1', raw[1:-1])
+            plain = raw
+    return _safe_basename(extended) or _safe_basename(plain)
+
+
+def has_file_extension(name: str) -> bool:
+    """Whether `name` ends in something a loader can recognise as an extension.
+
+    `os.path.splitext` alone says yes to `flux1.dev_<64 hex>`, a name whose
+    base has a dot and which ends in a hash; an extension is short and
+    alphanumeric.
+    """
+    return bool(_EXTENSION_RE.match(os.path.splitext(name or "")[1]))
+
+
+# Bounds for the 8-byte header length a safetensors file opens with. The
+# header is JSON describing the tensors; 100 MB is the limit the safetensors
+# library itself enforces.
+SAFETENSORS_MAX_HEADER = 100 * 1000 * 1000
+
+
+def sniff_model_extension(path: str) -> Optional[str]:
+    """The extension the bytes of `path` prove, or None when they prove none.
+
+    Only safetensors is recognised: an 8-byte little-endian header length that
+    fits inside the file, followed by `{`. Anything else is left alone, because
+    `torch.load` is what ComfyUI already does with an extensionless file.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            head = f.read(9)
+    except OSError:
+        return None
+    if len(head) < 9:
+        return None
+    n = int.from_bytes(head[:8], "little")
+    if 2 <= n <= min(SAFETENSORS_MAX_HEADER, size - 8) and head[8:9] == b"{":
+        return ".safetensors"
+    return None
+
+
+def _rewrite_sidecars_naming(dirpath: str, old_name: str, new_name: str) -> int:
+    """Every sidecar in `dirpath` that names `old_name` now names `new_name`.
+
+    Several urls may share one file (adoption), so renaming a file for one of
+    them and not the others would orphan the rest.
+    """
+    changed = 0
+    try:
+        names = sorted(f for f in os.listdir(dirpath) if f.endswith(".json"))
+    except OSError:
+        return 0
+    for f in names:
+        path = os.path.join(dirpath, f)
+        data = read_sidecar(path)
+        if not isinstance(data, dict) or data.get("file_name") != old_name:
+            continue
+        data["file_name"] = new_name
+        tmp = path + ".tmp"
+        with open(tmp, "w") as out:
+            json.dump(data, out, indent=4)
+        os.replace(tmp, path)
+        changed += 1
+    return changed
+
+
+def ensure_model_extension(path):
+    """`path`, or the path it was renamed to so its loader can be chosen.
+
+    THE BACKSTOP for a name that reached the disk without an extension: the
+    header did not state one, the metadata did not either, or the file was
+    downloaded before this code read those. It is applied to every path
+    `download_file` returns, so a file already on disk under the broken name
+    is repaired on its next run rather than downloaded again or left to fail.
+    `<base>_<hash>` becomes `<base>_<hash>.safetensors`: the hash part of the
+    name is kept, so a name asserting a content sha256 still asserts it.
+    """
+    if not path or not isinstance(path, str) or not os.path.isfile(path):
+        return path
+    name = os.path.basename(path)
+    if has_file_extension(name):
+        return path
+    ext = sniff_model_extension(path)
+    dirpath = os.path.dirname(path)
+    if ext is None:
+        print(f"[ANYMATIX] {name} has no file extension and its first bytes are not a "
+              f"safetensors header: left as it is (ComfyUI will load it with torch.load)")
+        return path
+    new_name = name + ext
+    new_path = os.path.join(dirpath, new_name)
+    if os.path.exists(new_path):
+        same = False
+        try:
+            same = (os.path.getsize(new_path) == os.path.getsize(path)
+                    and compute_file_sha256(new_path) == compute_file_sha256(path))
+        except OSError:
+            same = False
+        if not same:
+            print(f"[ANYMATIX] {name} is a safetensors file with no extension, but "
+                  f"{new_name} already exists with other bytes: left as it is")
+            return path
+        os.remove(path)
+        print(f"[ANYMATIX] {name} is a safetensors file with no extension and "
+              f"{new_name} holds the same bytes: using it")
+    else:
+        os.rename(path, new_path)
+        print(f"[ANYMATIX] {name} is a safetensors file with no extension: renamed to "
+              f"{new_name} so ComfyUI loads it as safetensors, not as a pickle")
+    _rewrite_sidecars_naming(dirpath, name, new_name)
+    return new_path
+
+
+def civitai_file_name(info) -> Optional[str]:
+    """The file name Civitai's model-version metadata gives the downloaded file.
+
+    The primary file's, else the first `Model` file's, else the first one's.
+    """
+    if not isinstance(info, dict) or not isinstance(info.get("files"), list):
+        return None
+    files = [f for f in info["files"] if isinstance(f, dict) and f.get("name")]
+    for pick in (lambda f: f.get("primary") is True,
+                 lambda f: f.get("type") == "Model",
+                 lambda f: True):
+        for f in files:
+            if pick(f):
+                return _safe_basename(f["name"])
+    return None
+
+
 def fetch_headers(url, session):
-    """Fetch headers with error handling for missing requests"""
+    """What the server states about `url`: its name, length and content hash.
+
+    `url` is the EFFECTIVE url — for Civitai the one carrying `token=<key>` —
+    so the header request is authorised exactly as the download is. A
+    key-only file answers a keyless request with 401, and a 401 here used to
+    be swallowed into "no name": the file was then named after the url's last
+    segment, the version id, with no extension.
+
+    `headers_failed` is True when the request itself failed, so the caller
+    knows nothing it got back is the server's word.
+    """
     if not REQUESTS_AVAILABLE:
-        return {"file_name": None, "file_size": None, "remote_sha256": None}
+        return {"file_name": None, "file_size": None, "remote_sha256": None,
+                "headers_failed": True}
 
     file_name = None
     file_size = None
     remote_sha256 = None
+    headers_failed = False
     try:
         # TODO: FIXME: should this be session.head??
         with session.get(url, allow_redirects=True, stream=True,
                          timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
             response.raise_for_status()
             if "Content-Disposition" in response.headers:
-                filename_match = re.search(
-                    r'filename="(.+)"', response.headers["Content-Disposition"])
-                if filename_match:
-                    file_name = filename_match.group(1)
+                file_name = filename_from_content_disposition(
+                    response.headers["Content-Disposition"])
             if "Content-Length" in response.headers:
                 file_size = int(response.headers.get('Content-Length', 0))
             # The content hash is announced on the FIRST response, not the last:
@@ -789,9 +994,16 @@ def fetch_headers(url, session):
                 remote_sha256 = content_sha256_from_headers(hop.headers)
                 if remote_sha256:
                     break
-    except Exception:
-        pass
-    return {"file_name": file_name, "file_size": file_size, "remote_sha256": remote_sha256}
+    except Exception as e:
+        headers_failed = True
+        # The exception's own text is never printed: a requests HTTPError
+        # names the url, and the url carries the Civitai key.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        print(f"[ANYMATIX] header request failed for {redact_url(url)}: "
+              f"{type(e).__name__}{f' {status}' if status else ''} - the server stated no "
+              f"name or length for this file")
+    return {"file_name": file_name, "file_size": file_size, "remote_sha256": remote_sha256,
+            "headers_failed": headers_failed}
 
 
 def fetch(url: str, session, callback: Callable[[bytes], None], local_file_size: int = 0, chunk_size=8192) -> None:
@@ -2317,6 +2529,22 @@ def finalize_download(part: str, file_path: str, expected_size, label: str) -> s
 
 def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None):
     """Return the path of the model for `url`, fetching it only if the machine
+    has not got it — under a name whose extension says how to load it.
+
+    Every way out of `_download_file` (a warm sidecar, an adoption, a finished
+    download) passes through `ensure_model_extension` here, once, so a file
+    that reached the disk without an extension is repaired whichever way it
+    is found.
+    """
+    return ensure_model_extension(_download_file(
+        url, dir, callback=callback, expand_info=expand_info,
+        effective_url=effective_url, redact_append=redact_append,
+        adopt_dirs=adopt_dirs, phase=phase,
+    ))
+
+
+def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None):
+    """Return the path of the model for `url`, fetching it only if the machine
     has not got it.
 
     `adopt_dirs` are extra directories that may already hold the bytes and are
@@ -2437,10 +2665,30 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
 
     with requests.Session() as session:
 
+        loaded = None
         if (os.path.exists(store_path)):
             print("loading json", store_path)
             with open(store_path, 'r') as contents:
-                data.update(json.load(contents))
+                loaded = json.load(contents)
+            # A SIDECAR THAT KNOWS NOTHING IS NOT KNOWLEDGE. One with no
+            # length, no proof, and nothing on disk under its name is what a
+            # failed header request used to leave behind — typically a keyless
+            # Civitai attempt answered 401, written before the download failed
+            # too. Its name is the url's last segment with no extension
+            # (`3417654_<url hash>`), and every later run, with the key,
+            # loaded it and downloaded the weight under that name. It is asked
+            # again instead.
+            stale_name = loaded.get("file_name") if isinstance(loaded, dict) else None
+            if isinstance(loaded, dict) and loaded.get("file_size") is None \
+                    and loaded.get("verified_size") is None \
+                    and stale_name and not has_file_extension(stale_name) \
+                    and not os.path.exists(os.path.join(dir, stale_name)) \
+                    and not os.path.exists(part_path_for(os.path.join(dir, stale_name))):
+                print(f"[ANYMATIX] {os.path.basename(store_path)} records {stale_name}, with no "
+                      f"length and nothing on disk: asking the server again for its name")
+                loaded = None
+        if loaded is not None:
+            data.update(loaded)
             # A sidecar with no `file_size` is one whose server stated no
             # length (`remembered_size`, `satisfied_by_sidecar`). Sidecars
             # written before the key existed omit it rather than storing None,
@@ -2449,13 +2697,8 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
         else:
             print("fetching headers", redact_url(effective, redact_append))
             data.update(fetch_headers(effective, session))
-            if data["file_name"] is None:
-                data["file_name"] = f"{file_name_default}"
-            f = data["file_name"]
-            data["name"] = f # Keep full original filename
-            x = f.rsplit(".", 1)
-            data["file_name"] = f"{x[0]}_{url_hash}" + \
-                ('.' + x[1] if len(x) > 1 else "")
+            headers_failed = bool(data.pop("headers_failed", False))
+            info = None
             if expand_info:
                 try:
                     info = expand_info(url)
@@ -2465,8 +2708,24 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
                     print(f"[WARNING] Failed to fetch model info (non-critical): {e}")
                     print(f"[WARNING] Model download will continue without metadata")
                     # Continue with download anyway - metadata is not essential
-            with open(store_path, 'w') as file:
-                json.dump(data, file, indent=4)
+            # The name, in order of authority: what the server states for the
+            # bytes, what the model's metadata calls its file (Civitai), and
+            # only then the url's last segment — which for Civitai is a
+            # version id with no extension.
+            if data["file_name"] is None:
+                data["file_name"] = civitai_file_name(info) or f"{file_name_default}"
+            f = data["file_name"]
+            data["name"] = f # Keep full original filename
+            x = f.rsplit(".", 1)
+            data["file_name"] = f"{x[0]}_{url_hash}" + \
+                ('.' + x[1] if len(x) > 1 else "")
+            # Nothing the server said is recorded when it said nothing: a
+            # sidecar written from a failed header request outlives the
+            # failure and fixes its guessed name on every later run.
+            # `finish_download` writes the sidecar once the bytes are here.
+            if not headers_failed:
+                with open(store_path, 'w') as file:
+                    json.dump(data, file, indent=4)
 
         # The content hash Civitai states in the model metadata, if there is one.
         metadata_hash = None

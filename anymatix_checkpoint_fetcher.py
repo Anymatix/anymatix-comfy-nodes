@@ -23,6 +23,7 @@ try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import (
         download_file,
+        ensure_model_extension,
         fetch_phase_message,
         hash_string,
         is_interrupt,
@@ -35,6 +36,7 @@ except Exception:
     try:
         from fetch import (
             download_file,
+            ensure_model_extension,
             fetch_phase_message,
             hash_string,
             is_interrupt,
@@ -1606,6 +1608,12 @@ class AnymatixFetcher:
                                         other_file_path = os.path.join(dir, other_file_name)
                                         if os.path.exists(other_file_path):
                                             print(f"[ANYMATIX] Model with hash {target_hash} already exists at {other_file_path}. Skipping download.")
+                                            # This way out bypasses `download_file`, so
+                                            # it gets the same extension backstop: an
+                                            # extensionless safetensors is loaded as a
+                                            # pickle and fails (fetch.ensure_model_extension).
+                                            other_file_path = ensure_model_extension(other_file_path)
+                                            other_file_name = os.path.basename(other_file_path)
                                             # Create sidecar for the current URL
                                             url_hash = hash_string(base_url) # Simple base_url hash for sidecar name
                                             new_sidecar_path = os.path.join(dir, f"{url_hash}.json")
