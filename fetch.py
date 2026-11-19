@@ -598,7 +598,12 @@ def satisfied_by_sidecar(dirpath: str, data: dict) -> Optional[str]:
     name = data.get("file_name")
     if not name:
         return None
-    path = os.path.join(dirpath, name)
+    try:
+        path = model_path_in(dirpath, name)
+    except UnsafeModelFileName:
+        # Not a name of this folder, so it describes nothing here; a download
+        # that reaches it is refused by the same guard.
+        return None
     if not os.path.isfile(path):
         return None
     size = remembered_size(data)
@@ -789,6 +794,62 @@ def _safe_basename(name) -> Optional[str]:
     if not text or text in (".", ".."):
         return None
     return text
+
+
+class UnsafeModelFileName(ValueError):
+    """A model file name that could write outside its folder, or that would
+    load a `.safetensors` link through another loader. Raised, never repaired:
+    the name came from a server or a sidecar, and neither is ours to trust."""
+
+
+def url_file_name(url) -> str:
+    """The file name the url's own path ends in, decoded; "" when it names none."""
+    path = urlparse(str(url or "")).path
+    return unquote(path.rsplit("/", 1)[-1]) if path else ""
+
+
+def model_path_in(dir, file_name) -> str:
+    """`dir/file_name`, when `file_name` is a bare name that stays in `dir`.
+
+    THE ONLY WAY A MODEL'S PATH IS BUILT FROM A NAME. `_safe_basename` reduces
+    what a server states; this refuses whatever still is not a bare name — a
+    separator, a control character, a leading dot, nothing at all — wherever
+    the name came from (the header, Civitai's metadata, the url, a sidecar
+    written by an older pack or by somebody else), and then checks the
+    resolved path, so a symlink in the folder cannot lead out of it either.
+    bugs/model-downloads-trust-server-s-file-name.
+    """
+    if not isinstance(file_name, str) or not file_name:
+        raise UnsafeModelFileName(f"refusing an empty model file name in {dir}")
+    if "/" in file_name or "\\" in file_name or file_name.startswith(".") \
+            or any(ch < " " or ch == "\x7f" for ch in file_name) \
+            or os.path.isabs(file_name) or os.path.splitdrive(file_name)[0]:
+        raise UnsafeModelFileName(f"refusing the model file name {file_name!r}: "
+                                  f"it is not a plain file name inside {dir}")
+    path = os.path.join(dir, file_name)
+    root = os.path.realpath(dir)
+    if os.path.dirname(os.path.realpath(path)) != root:
+        raise UnsafeModelFileName(f"refusing the model file name {file_name!r}: "
+                                  f"it resolves outside {dir}")
+    return path
+
+
+def require_safetensors_kept(url, file_name) -> None:
+    """A link naming a `.safetensors` file is stored as a `.safetensors` file.
+
+    ComfyUI picks the loader by extension, and every other extension it knows
+    may reach `torch.load` — which runs code. A card from a GitHub collection
+    is refused by the app unless its link names a `.safetensors` file
+    (bugs/collection-card-can-make-machine-download-pickle); this keeps the
+    server from turning that link into a `.ckpt` at download time. It holds for
+    every card: a server that answers a `.safetensors` link with another kind
+    of file is not serving what the link says.
+    """
+    if url_file_name(url).lower().endswith(".safetensors") \
+            and not str(file_name).lower().endswith(".safetensors"):
+        raise UnsafeModelFileName(
+            f"{url_file_name(url)} is served as {file_name}: a .safetensors link must "
+            f"download a .safetensors file, so nothing was saved")
 
 
 def filename_from_content_disposition(value) -> Optional[str]:
@@ -2659,7 +2720,9 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
             return satisfied
 
     parsed_url = urlparse(effective)
-    file_name_default = parsed_url.path.split('/')[-1].split('?')[0]
+    # The url's last segment is the name of last resort, and the url is the
+    # card's: reduced like a server's name, so `/..` or `/.x` names nothing.
+    file_name_default = _safe_basename(parsed_url.path.split('/')[-1].split('?')[0]) or url_hash
     # Always persist base URL, never include token-bearing URL
     data = {"url": url}
 
@@ -2715,6 +2778,7 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
             if data["file_name"] is None:
                 data["file_name"] = civitai_file_name(info) or f"{file_name_default}"
             f = data["file_name"]
+            require_safetensors_kept(url, f)
             data["name"] = f # Keep full original filename
             x = f.rsplit(".", 1)
             data["file_name"] = f"{x[0]}_{url_hash}" + \
@@ -2740,7 +2804,8 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
                         metadata_hash = f["hashes"].get("SHA256", "").lower()
                         if metadata_hash: break
 
-        file_path = os.path.join(dir, data["file_name"])
+        require_safetensors_kept(url, data["file_name"])
+        file_path = model_path_in(dir, data["file_name"])
 
         # What the bytes should hash to, if anybody told us: Civitai says it in
         # the model metadata, Hugging Face in `X-Linked-Etag`. Either way it is
@@ -2875,7 +2940,7 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
             data["verified_size"] = os.path.getsize(file_path)
 
             canonical_name = canonical_model_name(data["file_name"], sha256)
-            canonical_path = os.path.join(dir, canonical_name)
+            canonical_path = model_path_in(dir, canonical_name)
 
             if os.path.exists(canonical_path) and canonical_path != file_path:
                 print(f"[ANYMATIX] Deduplicated model found: {canonical_path}. Reusing.")
@@ -2892,7 +2957,7 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
 
             print("Model name:", data["file_name"])
 
-            return os.path.join(dir, data["file_name"])
+            return model_path_in(dir, data["file_name"])
 
         if data["file_size"] is not None:
             # THE FINAL NAME MEANS FINISHED. A file wearing it whose size is not
