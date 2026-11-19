@@ -22,6 +22,9 @@ import time
 try:
     # When loaded as a package inside ComfyUI, use relative import
     from .fetch import (
+        NotSafetensorsModel,
+        check_safetensors_file,
+        COLLECTION_SAFETENSORS_RULE,
         download_file,
         ensure_model_extension,
         fetch_phase_message,
@@ -35,6 +38,9 @@ except Exception:
     # When running this file directly for testing, fall back to absolute import
     try:
         from fetch import (
+            NotSafetensorsModel,
+            check_safetensors_file,
+            COLLECTION_SAFETENSORS_RULE,
             download_file,
             ensure_model_extension,
             fetch_phase_message,
@@ -1482,6 +1488,17 @@ class AnymatixFetcher:
         except Exception:
             pass
         _wait_for_running_prefetch(url)
+        # A card from a GitHub collection: only safetensors files are loaded,
+        # and the bytes decide (`fetch.check_safetensors_file`). The app sets
+        # it; the shipped library and the person's own cards never do.
+        safetensors_only = url.get("safetensors_only") is True
+        if safetensors_only and url.get("type") in CHATTERBOX_PACKS:
+            # A pack is several files, some of them not weights at all
+            # (a tokenizer) and its weights not safetensors.
+            raise NotSafetensorsModel(
+                f"\u201c{url.get('type')}\u201d is a voice pack, not a safetensors file: nothing was "
+                f"downloaded. {COLLECTION_SAFETENSORS_RULE}"
+            )
         if url.get("type") in CHATTERBOX_PACKS:
             pbar_cb = _progress_bar(phases_reported=False)
             prog = 0
@@ -1525,9 +1542,21 @@ class AnymatixFetcher:
                     pbar.update_absolute(new_p, 1000)
 
             if os.path.isfile(dest):
+                if safetensors_only:
+                    check_safetensors_file(dest)
                 return (os.path.basename(dest),)
             print(f"[ANYMATIX] fetching DWPose aux weight to {dest}")
             _stream_download_url_to_path(effective, dest, callback)
+            if safetensors_only:
+                try:
+                    check_safetensors_file(dest)
+                except NotSafetensorsModel as e:
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+                    raise NotSafetensorsModel(str(e).replace(
+                        "it was not loaded", "the download was stopped and nothing was kept")) from None
             return (os.path.basename(dest),)
 
         if url["type"] in dirmap:
@@ -1547,6 +1576,8 @@ class AnymatixFetcher:
                 candidate = _find_sha256_model_file_for_folder_type(type_folder, sha256_hex)
                 if candidate:
                     print(f"[ANYMATIX] Resolved sha256:// to local user model: {candidate}")
+                    if safetensors_only:
+                        check_safetensors_file(candidate)
                     return (candidate,)
                 raise FileNotFoundError(
                     f"No model file found for {base_url} under folder_paths[{type_folder}]. "
@@ -1613,6 +1644,8 @@ class AnymatixFetcher:
                                             # extensionless safetensors is loaded as a
                                             # pickle and fails (fetch.ensure_model_extension).
                                             other_file_path = ensure_model_extension(other_file_path)
+                                            if safetensors_only:
+                                                check_safetensors_file(other_file_path)
                                             other_file_name = os.path.basename(other_file_path)
                                             # Create sidecar for the current URL
                                             url_hash = hash_string(base_url) # Simple base_url hash for sidecar name
@@ -1626,6 +1659,8 @@ class AnymatixFetcher:
                                             with open(new_sidecar_path, 'w') as f:
                                                 json.dump(new_data, f, indent=4)
                                             return (other_file_path,)
+                            except NotSafetensorsModel:
+                                raise
                             except Exception:
                                 pass
 
@@ -1680,11 +1715,13 @@ class AnymatixFetcher:
                         # for the whole download again, by the minute.
                         adopt_dirs=[dir] if cache_dir else None,
                         phase=set_phase,
+                        safetensors_only=safetensors_only,
                     )
                 except Exception as e:
                     # A Stop is not a cache-disk problem: retrying against the
                     # durable dir would start the download it just stopped.
-                    if not cache_dir or is_interrupt(e):
+                    # Nor is a file that is not safetensors.
+                    if not cache_dir or is_interrupt(e) or isinstance(e, NotSafetensorsModel):
                         raise
                     # Whatever went wrong on the cache disk (full, gone, odd),
                     # the durable dir is the behaviour that always worked.
@@ -1698,6 +1735,7 @@ class AnymatixFetcher:
                         effective_url=effective,
                         redact_append=auth,
                         phase=set_phase,
+                        safetensors_only=safetensors_only,
                     )
                 # ONLY MIRROR WHAT IS ACTUALLY ON THE CACHE DISK. `download_file`
                 # may adopt a file out of `adopt_dirs` and hand back a path on
@@ -1723,7 +1761,7 @@ class AnymatixFetcher:
                 # ends `interrupted`. Rewrapped into "Failed to download ..."
                 # both read as failures, and the part file looked abandoned
                 # (`bugs/a-paused-download-re-fetches-up-256-mib`, app repo).
-                if is_interrupt(e):
+                if is_interrupt(e) or isinstance(e, NotSafetensorsModel):
                     raise
                 # Enhance error message with context for better debugging
                 model_type = url.get("type", "unknown")

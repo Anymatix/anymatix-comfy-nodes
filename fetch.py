@@ -852,6 +852,126 @@ def require_safetensors_kept(url, file_name) -> None:
             f"download a .safetensors file, so nothing was saved")
 
 
+# A CARD FROM A GITHUB COLLECTION LOADS SAFETENSORS FILES ONLY, AND THE BYTES SAY
+# WHETHER A FILE IS ONE — NOT ITS NAME.
+#
+# App repo: naima todos/collection-cards-check-each-model-s-content (and
+# bugs/collection-card-can-make-machine-download-pickle). Vincenzo, 2026-11-19:
+# "if you fetch and it's NOT safetensors you will not execute it". A Civitai
+# link names no file, and a name proves nothing anyway: every other weight
+# format ComfyUI loads may reach `torch.load`, which runs code. A safetensors
+# file is an 8-byte little-endian header length N, then N bytes of a JSON
+# object; a pickle starts 0x80, a PyTorch zip `PK`, an error page `<`, a GGUF
+# `GGUF` — none of them can pass.
+#
+# The app asks for this with `safetensors_only: true` in the fetcher's `url`
+# input (and in a prefetch's), for a card from a GitHub collection only. The
+# shipped library and the person's own cards are not affected.
+
+SAFETENSORS_HEADER_MAX_BYTES = 100 * 1024 * 1024
+SAFETENSORS_PROBE_BYTES = 64 * 1024
+COLLECTION_SAFETENSORS_RULE = "Cards from GitHub collections run safetensors models only."
+
+
+class NotSafetensorsModel(Exception):
+    """A model a collection card asked for whose bytes are not a safetensors
+    file. Raised as it is, never rewrapped: its sentence is the one the person
+    reads, naming the file and the rule."""
+
+
+def what_the_bytes_look_like(head: bytes) -> str:
+    """A plain name for what a file that is not safetensors starts like."""
+    if head.startswith(b"\x80"):
+        return "it is a pickle"
+    if head.startswith(b"PK"):
+        return "it is a zip archive, as PyTorch .pt and .ckpt files are"
+    if head.startswith(b"GGUF"):
+        return "it is a GGUF file"
+    text = head.lstrip()[:16].lower()
+    if text.startswith(b"<"):
+        return "it is a web page"
+    if text.startswith(b"{") or text.startswith(b"["):
+        return "it is JSON text"
+    return "it does not start like one"
+
+
+def safetensors_prefix_problem(head: bytes, ended: bool, total_size=None) -> Optional[str]:
+    """None when `head` can be the start of a safetensors file, else what is wrong.
+
+    `ended`: `head` is all there is (the file, or a stream that stopped), so a
+    header cut short is a truncated file, not a header still to come.
+    `total_size`: the whole file's length, when known.
+    """
+    if len(head) < 9:
+        return "it is cut short" if ended or len(head) > 0 else "it is empty"
+    n = int.from_bytes(head[:8], "little")
+    if n < 2 or n > SAFETENSORS_HEADER_MAX_BYTES:
+        return what_the_bytes_look_like(head)
+    if head[8:9] != b"{":
+        return what_the_bytes_look_like(head)
+    if total_size is not None and 8 + n > total_size:
+        return "it is cut short"
+    if len(head) >= 8 + n:
+        try:
+            header = json.loads(head[8:8 + n].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return "its header is not JSON"
+        if not isinstance(header, dict):
+            return "its header is not a JSON object"
+        return None
+    if ended:
+        return "it is cut short"
+    return None
+
+
+def not_safetensors_message(label, problem: str, downloaded: bool) -> str:
+    after = "the download was stopped and nothing was kept" if downloaded else "it was not loaded"
+    return f"\u201c{label}\u201d is not a safetensors file ({problem}): {after}. {COLLECTION_SAFETENSORS_RULE}"
+
+
+def check_safetensors_file(path: str, label: Optional[str] = None) -> None:
+    """Raise NotSafetensorsModel unless the file at `path` is a safetensors file.
+
+    Reads the 8-byte length and the whole header (bounded), never the tensors.
+    """
+    label = label or os.path.basename(path)
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(8)
+        if len(head) == 8:
+            n = int.from_bytes(head, "little")
+            if 2 <= n <= SAFETENSORS_HEADER_MAX_BYTES:
+                head += f.read(n)
+            else:
+                head += f.read(64)
+    problem = safetensors_prefix_problem(head, ended=True, total_size=size)
+    if problem:
+        raise NotSafetensorsModel(not_safetensors_message(label, problem, downloaded=False))
+
+
+def probe_safetensors_url(effective: str, session, label, total_size=None) -> Optional[str]:
+    """Read the first bytes `effective` serves and say what is wrong, or None.
+
+    A ranged request for the first 64 KiB, and the stream is closed as soon as
+    they are read — a server that ignores the range still sends no more than
+    that before we hang up. Nothing is written to disk.
+    """
+    head = b""
+    with session.get(effective, headers={"Range": f"bytes=0-{SAFETENSORS_PROBE_BYTES - 1}"},
+                     allow_redirects=True, stream=True,
+                     timeout=(DOWNLOAD_CONNECT_SECONDS, DOWNLOAD_STALL_SECONDS)) as response:
+        response.raise_for_status()
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            head += chunk
+            if len(head) >= SAFETENSORS_PROBE_BYTES:
+                break
+    head = head[:SAFETENSORS_PROBE_BYTES]
+    ended = len(head) < SAFETENSORS_PROBE_BYTES
+    return safetensors_prefix_problem(head, ended=ended, total_size=total_size)
+
+
 def filename_from_content_disposition(value) -> Optional[str]:
     """The file name a `Content-Disposition` header states, in any of its forms.
 
@@ -2588,7 +2708,7 @@ def finalize_download(part: str, file_path: str, expected_size, label: str) -> s
     return file_path
 
 
-def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None):
+def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None, safetensors_only: bool = False):
     """Return the path of the model for `url`, fetching it only if the machine
     has not got it — under a name whose extension says how to load it.
 
@@ -2597,14 +2717,34 @@ def download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], No
     that reached the disk without an extension is repaired whichever way it
     is found.
     """
-    return ensure_model_extension(_download_file(
+    fetched = {"here": False}
+    path = ensure_model_extension(_download_file(
         url, dir, callback=callback, expand_info=expand_info,
         effective_url=effective_url, redact_append=redact_append,
         adopt_dirs=adopt_dirs, phase=phase,
+        safetensors_only=safetensors_only, fetched=fetched,
     ))
+    if safetensors_only:
+        # THE WHOLE HEADER, ON DISK, BEFORE ANYTHING LOADS IT: the probe saw only
+        # what the server sent first, and a file already here was never probed.
+        # A file this call downloaded that fails goes, with its sidecar; one
+        # that was already here may be another card's, so it is only refused.
+        try:
+            check_safetensors_file(path)
+        except NotSafetensorsModel as e:
+            if not fetched["here"]:
+                raise
+            for doomed in (path, os.path.join(dir, f"{hash_string(url)}.json")):
+                try:
+                    os.remove(doomed)
+                except OSError:
+                    pass
+            raise NotSafetensorsModel(str(e).replace(
+                "it was not loaded", "the download was stopped and nothing was kept")) from None
+    return path
 
 
-def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None):
+def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], None]] = None, expand_info: Optional[Callable[[str], dict | None]] = None, effective_url: Optional[str] = None, redact_append: Optional[str] = None, adopt_dirs: Optional[List[str]] = None, phase: Optional[Callable[[str], None]] = None, safetensors_only: bool = False, fetched: Optional[dict] = None):
     """Return the path of the model for `url`, fetching it only if the machine
     has not got it.
 
@@ -3102,6 +3242,27 @@ def _download_file(url, dir, callback: Optional[Callable[[int, Optional[int]], N
                     os.remove(part_file)
                 clear_part_completion(part_file)
                 return adopted
+
+        # A COLLECTION CARD'S MODEL IS READ BEFORE IT IS DOWNLOADED: its first
+        # bytes must be a safetensors header, or nothing is written and what
+        # is already here for it (a part file, its journal, the sidecar the
+        # header request wrote) goes.
+        if safetensors_only:
+            problem = probe_safetensors_url(effective, session, data.get("name") or data["file_name"],
+                                            data.get("file_size"))
+            if problem:
+                for doomed in (part_file, store_path):
+                    try:
+                        os.remove(doomed)
+                    except OSError:
+                        pass
+                clear_part_completion(part_file)
+                clear_segment_journal(part_file)
+                label = data.get("name") or url_file_name(url) or data["file_name"]
+                print(f"[ANYMATIX] refusing {label}: not a safetensors file ({problem})")
+                raise NotSafetensorsModel(not_safetensors_message(label, problem, downloaded=True))
+        if fetched is not None:
+            fetched["here"] = True
 
         downloaded_size = local_file_size
         in_phase("fetching")

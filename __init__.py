@@ -639,7 +639,10 @@ async def serve_prefetch(request):
         return web.json_response({"status": "error", "error": "'url' must be {url, type}"}, status=400)
     wanted = data.get("id")
     wanted = wanted if isinstance(wanted, str) and 0 < len(wanted) <= 128 else None
-    url = {"url": url["url"], "type": url["type"]}
+    # `safetensors_only` travels: a collection card's model is checked by its
+    # bytes outside the queue as inside it (`fetch.check_safetensors_file`).
+    url = {"url": url["url"], "type": url["type"],
+           **({"safetensors_only": True} if url.get("safetensors_only") is True else {})}
     server = PromptServer.instance
 
     def on_end(p):
