@@ -1172,9 +1172,10 @@ dirmap = {
     "SEEDVR2_model": "SEEDVR2",
     "SEEDVR2_vae_model": "SEEDVR2",
     # Virtual types: the download target is a PACK DIRECTORY, not a file in a
-    # folder_paths category — see CHATTERBOX_PACKS and download_chatterbox_hf_pack.
+    # folder_paths category — see MODEL_PACKS and download_chatterbox_hf_pack.
     "chatterbox_model_pack": "chatterbox_model_pack",
     "chatterbox_multilingual_pack": "chatterbox_multilingual_pack",
+    "whisper_pack": "whisper_pack",
 }
 
 # Annotator checkpoints: one flat directory, fetched by us so
@@ -1296,11 +1297,51 @@ CHATTERBOX_PACKS = {
 }
 
 
+# THE WHISPER PACK IS A PACK OF THE SAME SHAPE, READ BY OUR OWN NODE.
+# `AnymatixWhisperTranscribe` (anymatix_whisper.py) loads a transformers
+# checkpoint directory: weights, config and the tokenizer files, under their
+# canonical names. It is fetched exactly like a Chatterbox pack, so it is one
+# more entry in the same kind of table rather than a second download loop.
+WHISPER_PACKS = {
+    "whisper_pack": {
+        "name": "whisper_large_v3_turbo",
+        "subdir": ("models", "stt", "whisper_large_v3_turbo"),
+        "files": (
+            "model.safetensors",
+            "config.json",
+            "generation_config.json",
+            "preprocessor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json",
+            "merges.txt",
+            "normalizer.json",
+            "added_tokens.json",
+            "special_tokens_map.json",
+        ),
+    },
+}
+
+# Every multi-file pack the fetcher knows, whichever node reads it.
+MODEL_PACKS = {**CHATTERBOX_PACKS, **WHISPER_PACKS}
+
+
 def _chatterbox_pack_spec(pack_type: str) -> dict:
-    spec = CHATTERBOX_PACKS.get(pack_type)
+    spec = MODEL_PACKS.get(pack_type)
     if spec is None:
-        raise ValueError(f"unknown Chatterbox pack type {pack_type!r}")
+        raise ValueError(f"unknown model pack type {pack_type!r}")
     return spec
+
+
+def model_pack_dir_by_name(name: str) -> str:
+    """The directory of the pack the fetcher returned `name` for."""
+    for pack_type, spec in MODEL_PACKS.items():
+        if spec["name"] == name:
+            return _chatterbox_pack_dir(pack_type)
+    raise ValueError(
+        f"{name!r} is not a model pack the fetcher knows: "
+        f"{', '.join(sorted(spec['name'] for spec in MODEL_PACKS.values()))}"
+    )
 
 
 def _chatterbox_pack_dir(pack_type: str = "chatterbox_model_pack") -> str:
@@ -1330,7 +1371,7 @@ def _chatterbox_pack_file_url(pack_url: str, pack_file: str) -> str:
     m = _CHATTERBOX_HF_PACK_RE.match(url)
     if not m:
         raise ValueError(
-            f"Chatterbox pack url does not name a revision: {url!r}. It must be "
+            f"Model pack url does not name a revision: {url!r}. It must be "
             "https://huggingface.co/<org>/<repo>/resolve/<revision>, where "
             "<revision> is the commit the card is pinned to."
         )
@@ -1372,8 +1413,8 @@ def download_chatterbox_hf_pack(url_dict: dict, callback) -> tuple[str, ...]:
             except Exception:
                 shutil.copy2(downloaded_path, target_path)
         if not os.path.isfile(target_path):
-            raise FileNotFoundError(f"Chatterbox pack file missing after download: {target_path}")
-    print(f"[ANYMATIX] fetched Chatterbox model pack {spec['name']}")
+            raise FileNotFoundError(f"Model pack file missing after download: {target_path}")
+    print(f"[ANYMATIX] fetched model pack {spec['name']}")
     return (spec["name"],)
 
 
@@ -1492,14 +1533,14 @@ class AnymatixFetcher:
         # and the bytes decide (`fetch.check_safetensors_file`). The app sets
         # it; the shipped library and the person's own cards never do.
         safetensors_only = url.get("safetensors_only") is True
-        if safetensors_only and url.get("type") in CHATTERBOX_PACKS:
+        if safetensors_only and url.get("type") in MODEL_PACKS:
             # A pack is several files, some of them not weights at all
             # (a tokenizer) and its weights not safetensors.
             raise NotSafetensorsModel(
-                f"\u201c{url.get('type')}\u201d is a voice pack, not a safetensors file: nothing was "
+                f"\u201c{url.get('type')}\u201d is a model pack, not a safetensors file: nothing was "
                 f"downloaded. {COLLECTION_SAFETENSORS_RULE}"
             )
-        if url.get("type") in CHATTERBOX_PACKS:
+        if url.get("type") in MODEL_PACKS:
             pbar_cb = _progress_bar(phases_reported=False)
             prog = 0
             pbar_cb.update_absolute(prog, 1000)
@@ -1812,7 +1853,7 @@ class AnymatixFetcher:
         raise ValueError(
             f"AnymatixFetcher does not know how to fetch type "
             f"{url.get('type')!r}. Known types: "
-            f"{', '.join(sorted(set(dirmap) | set(_AUX_ANNOTATOR_TYPES) | set(CHATTERBOX_PACKS)))}. "
+            f"{', '.join(sorted(set(dirmap) | set(_AUX_ANNOTATOR_TYPES) | set(MODEL_PACKS)))}. "
             f"URL: {url.get('url')}"
         )
 
@@ -1824,7 +1865,7 @@ class AnymatixFetcher:
         file has been deleted.
         """
         pack_type = url.get("type")
-        if pack_type in CHATTERBOX_PACKS:
+        if pack_type in MODEL_PACKS:
             # EVERY file, not a sentinel one. A pack whose first file landed and
             # whose second did not is exactly the state a probe on one file
             # reports as healthy, and the node then fails on a missing weight
@@ -1838,7 +1879,7 @@ class AnymatixFetcher:
             if not missing:
                 return hash_string(str(url.get("url") or ""))
             print(
-                f"[ANYMATIX IS_CHANGED] Chatterbox pack {pack_dir} missing "
+                f"[ANYMATIX IS_CHANGED] Model pack {pack_dir} missing "
                 f"{', '.join(missing)}, forcing fetch"
             )
             return float("NaN")

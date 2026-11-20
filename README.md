@@ -35,7 +35,9 @@ existed when the graph was written.
 **Utilities.** `AnymatixCLIPSeg` (text-prompted segmentation),
 `AnymatixMaskImage`, `AnymatixMaskToSAMcoord` (a mask becomes SAM point
 prompts), `AnymatixAudioDuration` and `AnymatixFrameCount` (read a length off
-the file instead of asking for it), `AnymatixLTXResizeToClosestValidSize`.
+the file instead of asking for it), `AnymatixLTXResizeToClosestValidSize`,
+`AnymatixWhisperTranscribe` (speech to text with word timings, from a Whisper
+pack the fetcher put on disk as `url/whisper_pack`).
 
 **Offline preprocessors.** `AnymatixDWPreprocessor`, `AnymatixHEDPreprocessor`
 and `AnymatixZoeDepthAnythingPreprocessor` wrap the `comfyui_controlnet_aux`
