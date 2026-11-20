@@ -85,7 +85,7 @@ class AnymatixWhisperTranscribe:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "timings")
     FUNCTION = "transcribe"
-    CATEGORY = "anymatix/audio"
+    CATEGORY = "Anymatix/audio"
 
     def transcribe(self, audio, model_pack, language, word_timings):
         model_dir = model_pack_dir_by_name(model_pack)
