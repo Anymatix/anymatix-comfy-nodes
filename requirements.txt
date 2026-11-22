@@ -31,3 +31,8 @@ shapely                # Manipulation and analysis of geometric objects in the C
 # x86_64/aarch64. cryptography generates the per-install signing key.
 c2pa-python==0.37.12
 cryptography>=42.0.0
+
+# The 3D code card (anymatix_code3d.py): headless OpenGL through ModernGL --
+# EGL on Linux, WGL on Windows, CGL on macOS. Wheels for all three; glcontext
+# comes with it. On Linux the NVIDIA driver's libEGL must be present.
+moderngl>=5.12.0

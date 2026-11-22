@@ -39,6 +39,11 @@ the file instead of asking for it), `AnymatixLTXResizeToClosestValidSize`,
 `AnymatixWhisperTranscribe` (speech to text with word timings, from a Whisper
 pack the fetcher put on disk as `url/whisper_pack`).
 
+**A GPU engine.** `AnymatixCode3D` runs a Shadertoy-style GLSL program
+(Common, Buffer A-D, Image) frame by frame through headless OpenGL (ModernGL:
+EGL on Linux) and returns colour frames and exact depth frames, for the
+Anymatix 3D code card (spec: the app's `3d-code-card-v1.md`).
+
 **Offline preprocessors.** `AnymatixDWPreprocessor`, `AnymatixHEDPreprocessor`
 and `AnymatixZoeDepthAnythingPreprocessor` wrap the `comfyui_controlnet_aux`
 implementations but load their weights from a local path, so they work with
