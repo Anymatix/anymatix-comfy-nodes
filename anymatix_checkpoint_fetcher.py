@@ -31,6 +31,7 @@ try:
         hash_string,
         is_interrupt,
         is_under_nvme_cache,
+        model_path_in,
         pick_durable_dir,
         satisfied_locally,
     )
@@ -47,6 +48,7 @@ except Exception:
             hash_string,
             is_interrupt,
             is_under_nvme_cache,
+            model_path_in,
             pick_durable_dir,
             satisfied_locally,
         )
@@ -1229,13 +1231,22 @@ def _destination_path_for_dwpose_aux_url(base_url: str, root: str, nested: bool 
     # comfyui_controlnet_aux looks the file up by NAME under
     # AUX_ANNOTATOR_CKPTS_PATH, so two revisions of one filename are one file
     # on disk, exactly as before.
-    fn = m.group(4)
+    #
+    # Every segment taken from the url becomes a path component only through
+    # `model_path_in`: the filename group runs to the query, so
+    # `.../resolve/main/../../x` or an org of `..` would otherwise land outside
+    # the checkpoints folder -- written by any card, including a stranger's
+    # GitHub collection card (bugs/model-downloads-trust-server-s-file-name).
+    # A filename in a sub-folder of the repo is refused with it: the consuming
+    # nodes look checkpoints up by a plain name, and none we ship has one.
     if nested:
         # custom_hf_download's own layout: <ckpts>/<org>/<repo>/<filename>.
-        return os.path.join(root, m.group(1), m.group(2), fn)
+        org_dir = model_path_in(root, m.group(1))
+        repo_dir = model_path_in(org_dir, m.group(2))
+        return model_path_in(repo_dir, m.group(4))
     # Runtime contract: our own wrapper nodes consume plain filenames and
     # resolve them under AUX_ANNOTATOR_CKPTS_PATH (flat layout).
-    return os.path.join(root, fn)
+    return model_path_in(root, m.group(4))
 
 
 

@@ -58,7 +58,12 @@ def _load_under_test():
     assert len(wanted) == 2, (
         f"expected {_RE_NAME} and {_FN_NAME} in {_SOURCE}, found {len(wanted)}"
     )
-    namespace = {"re": re, "os": os}
+    # `model_path_in` is the pack's one way to turn a name into a path; it is
+    # imported by the module under test from fetch.py, which imports cleanly.
+    sys.path.insert(0, os.path.dirname(_HERE))
+    from fetch import model_path_in
+
+    namespace = {"re": re, "os": os, "model_path_in": model_path_in}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), _SOURCE, "exec"), namespace)
     return namespace[_FN_NAME]
 
@@ -165,3 +170,25 @@ def test_the_shipped_urls_are_the_ones_the_library_actually_carries():
     """
     for url in (SHIPPED_YOLOX, SHIPPED_DWLL):
         assert re.match(r"^https://huggingface\.co/[^/]+/[^/]+/resolve/[0-9a-f]{40}/", url)
+
+
+@pytest.mark.parametrize(
+    "url,nested",
+    [
+        # bugs/model-downloads-trust-server-s-file-name: the filename group runs
+        # to the query, so a card's url could climb out of the checkpoints
+        # folder -- and the download is written before anything is checked.
+        ("https://huggingface.co/a/b/resolve/main/../../../.zshrc", False),
+        ("https://huggingface.co/a/b/resolve/main/sub/../../x.onnx", False),
+        ("https://huggingface.co/a/b/resolve/main/sub/x.onnx", False),
+        ("https://huggingface.co/a/b/resolve/main/.hidden", False),
+        ("https://huggingface.co/../../resolve/main/x.pth", True),
+        ("https://huggingface.co/a/../resolve/main/x.pth", True),
+        ("https://huggingface.co/a/b/resolve/main/../x.pth", True),
+    ],
+)
+def test_a_url_cannot_place_the_checkpoint_outside_its_folder(url, nested, tmp_path):
+    from fetch import UnsafeModelFileName
+
+    with pytest.raises(UnsafeModelFileName):
+        destination_path(url, str(tmp_path), nested=nested)
