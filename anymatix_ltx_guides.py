@@ -19,6 +19,12 @@ keyframe is loaded exactly as a picture input is.
 
 Each pair keeps its exact frame. `LTXVAddGuide.get_latent_index` snaps a
 frame only for a multi-frame guide; a still lands where the timeline put it.
+
+`img_compression` is ComfyUI's `LTXVPreprocess` applied to every keyframe before
+it becomes a guide, as ComfyUI's own LTX templates do (18 in "First & Last Frame
+to Video (LTX-2.5)"). Measured on shot sh010 (cartoon, keys 0261->0278, 6 seeds):
+skipping it, together with the card's other departures from that template, made
+in-between frames melt in 4 seeds of 6 instead of 1. 0 passes the picture through.
 """
 
 import json
@@ -63,7 +69,10 @@ class AnymatixAddGuides:
                 "latent": ("LATENT",),
                 "keyframes": ("STRING", {"default": "[]", "multiline": True}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
-            }
+            },
+            "optional": {
+                "img_compression": ("INT", {"default": 0, "min": 0, "max": 100}),
+            },
         }
 
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
@@ -71,13 +80,15 @@ class AnymatixAddGuides:
     FUNCTION = "add"
     CATEGORY = "Anymatix"
 
-    def add(self, positive, negative, vae, latent, keyframes, strength):
-        from comfy_extras.nodes_lt import LTXVAddGuide
+    def add(self, positive, negative, vae, latent, keyframes, strength, img_compression=0):
+        from comfy_extras.nodes_lt import LTXVAddGuide, LTXVPreprocess
         from nodes import LoadImage
 
         loader = LoadImage()
         for image_name, frame in parse_keyframes(keyframes):
             image = loader.load_image(image_name)[0]
+            if img_compression > 0:
+                image = getattr(LTXVPreprocess.execute(image=image, img_compression=img_compression), "result", None)[0]
             positive, negative, latent = _result(
                 LTXVAddGuide.execute(
                     positive=positive,

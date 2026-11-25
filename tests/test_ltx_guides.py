@@ -46,8 +46,14 @@ def calls(monkeypatch):
         def load_image(self, image):
             return (f"pixels of {image}", None)
 
+    class LTXVPreprocess:
+        @classmethod
+        def execute(cls, image, img_compression):
+            return _NodeOutput(f"{image} compressed {img_compression}")
+
     nodes_lt = types.ModuleType("comfy_extras.nodes_lt")
     nodes_lt.LTXVAddGuide = LTXVAddGuide
+    nodes_lt.LTXVPreprocess = LTXVPreprocess
     monkeypatch.setitem(sys.modules, "comfy_extras", types.ModuleType("comfy_extras"))
     monkeypatch.setitem(sys.modules, "comfy_extras.nodes_lt", nodes_lt)
     nodes = types.ModuleType("nodes")
@@ -66,6 +72,18 @@ def test_applies_every_pair_in_order_at_its_exact_frame(calls):
     assert calls[3][3] == [0, 18, 24]
     assert positive == [0, 18, 24, 26, 48, 138, 165, 182, 186, 200]
     assert latent["samples"] == 10
+
+
+def test_preprocesses_every_keyframe_when_asked(calls):
+    pairs = [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 64}]
+    AnymatixAddGuides().add([], [], "vae", {"samples": 0}, json.dumps(pairs), 0.7, img_compression=18)
+    assert [c[0] for c in calls] == ["pixels of a.png compressed 18", "pixels of b.png compressed 18"]
+
+
+def test_passes_pictures_through_without_compression(calls):
+    pairs = [{"image": "a.png", "frame": 0}]
+    AnymatixAddGuides().add([], [], "vae", {"samples": 0}, json.dumps(pairs), 0.7)
+    assert [c[0] for c in calls] == ["pixels of a.png"]
 
 
 def test_takes_more_than_any_fixed_count(calls):
