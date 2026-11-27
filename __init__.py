@@ -57,6 +57,7 @@ from .anymatix_image_to_video import AnymatixImageToVideo
 from .anymatix_load_image_batch import AnymatixLoadImageBatch
 from .anymatix_ltx_resize import AnymatixLTXResizeToClosestValidSize
 from .anymatix_ltx_guides import AnymatixAddGuides
+from .anymatix_h3_guides import AnymatixH3AddGuides
 from .anymatix_media_length import AnymatixAudioDuration, AnymatixFrameCount
 from .anymatix_save_animated_mp4 import AnymatixSaveAnimatedMP4
 from .anymatix_save_audio import AnymatixSaveAudio
@@ -95,6 +96,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixLoadImageBatch": AnymatixLoadImageBatch,
     "AnymatixLTXResizeToClosestValidSize": AnymatixLTXResizeToClosestValidSize,
     "AnymatixAddGuides": AnymatixAddGuides,
+    "AnymatixH3AddGuides": AnymatixH3AddGuides,
     "AnymatixAudioDuration": AnymatixAudioDuration,
     "AnymatixFrameCount": AnymatixFrameCount,
     "AnymatixSaveAnimatedMP4": AnymatixSaveAnimatedMP4,
@@ -141,6 +143,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixLoadImageBatch": "Anymatix Load Image Batch",
     "AnymatixLTXResizeToClosestValidSize": "Anymatix LTX Resize To Closest Valid Size",
     "AnymatixAddGuides": "Anymatix Add LTX Keyframe Guides",
+    "AnymatixH3AddGuides": "Anymatix Add MiniMax H3 Keyframe Guides",
     "AnymatixAudioDuration": "Anymatix Audio Duration",
     "AnymatixFrameCount": "Anymatix Frame Count",
     "AnymatixSaveAnimatedMP4": "Anymatix Save Animated MP4",
