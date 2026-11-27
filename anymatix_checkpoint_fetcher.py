@@ -978,6 +978,41 @@ class AnymatixUpscaleModelLoader:
         return (out,)
 
 
+class AnymatixLoadBackgroundRemovalModel:
+    """
+    THE URL-FETCHING TWIN OF ComfyUI's LoadBackgroundRemovalModel
+    (comfy_extras/nodes_bg_removal.py).
+
+    The core node takes `bg_removal_name` as a COMBO of the files already in
+    models/background_removal, and ComfyUI validates a combo before any node
+    runs, so a weight that AnymatixFetcher downloads during the run can never
+    reach it. This twin takes the path the fetcher returns, as
+    AnymatixUpscaleModelLoader does, and loads it with the same call the core
+    node makes (`comfy.bg_removal_model.load`), keeping its error message.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"bg_removal_name": ("STRING", {})}}
+
+    RETURN_TYPES = ("BACKGROUND_REMOVAL",)
+    RETURN_NAMES = ("bg_model",)
+    FUNCTION = "load_model"
+
+    CATEGORY = "Anymatix"
+    DESCRIPTION = "Loads a background removal model (BiRefNet) from a fetched file"
+
+    def load_model(self, bg_removal_name):
+        from comfy.bg_removal_model import load
+
+        model_path = bg_removal_name
+        verify_model_file_exists(model_path, "background removal model")
+        bg = load(model_path)
+        if bg is None:
+            raise RuntimeError("ERROR: background model file is invalid and does not contain a valid background removal model.")
+        return (bg,)
+
+
 class AnymatixCheckpointLoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -1160,6 +1195,9 @@ dirmap = {
     "model_patch": "model_patches",
     "controlnet": "controlnet",
     "upscale": "upscale_models",
+    # BiRefNet and its kin, read by AnymatixLoadBackgroundRemovalModel; the
+    # folder is ComfyUI's own folder_paths name for them.
+    "background_removal": "background_removal",
     "latent_upscale": "latent_upscale_models",
     "vae": "vae",
     "diffusion_model": "diffusion_models",
