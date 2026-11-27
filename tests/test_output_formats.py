@@ -328,3 +328,74 @@ def test_a_lossless_rung_is_very_much_larger_than_a_delivery_one(tmp_path):
     archival = os.path.getsize(_encode(tmp_path / "a", "ffv1"))
     delivery = os.path.getsize(_encode(tmp_path / "b", "h265_crf24"))
     assert archival > delivery * 3
+
+
+# ------------------------------------------------------------ HDR AVIF -----
+#
+# The HDR rung of the SDR to HDR card. The values arrive already encoded in
+# HLG (or PQ) on Rec.2020; the file must SAY so, or every viewer decodes it as
+# sRGB and the highlights the card made are drawn as a flat SDR picture.
+
+
+def _ffprobe_stream(path):
+    av = pytest.importorskip("av")
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        context = stream.codec_context
+        frame = next(container.decode(stream))
+        return {
+            "format": container.format.name,
+            "pix_fmt": frame.format.name,
+            "primaries": int(context.color_primaries),
+            "transfer": int(context.color_trc),
+            "matrix": int(context.colorspace),
+            "size": (frame.width, frame.height),
+        }
+
+
+@pytest.mark.parametrize("space, transfer", [("HDR", 18), ("HDR PQ", 16)])
+def test_hdr_avif_declares_bt2020_and_its_transfer_at_ten_bits(tmp_path, space, transfer):
+    pytest.importorskip("av")
+    path = str(tmp_path / "hdr.avif")
+    write_image(a_gradient(64, 48), path, extension="avif", quality=90, color_space=space)
+    probe = _ffprobe_stream(path)
+    assert probe["pix_fmt"].startswith("yuv420p10")
+    assert (probe["primaries"], probe["transfer"], probe["matrix"]) == (9, transfer, 9)
+    assert probe["size"] == (48, 64)
+
+
+def test_srgb_avif_keeps_the_eight_bit_path(tmp_path):
+    """The default is the 8-bit OpenCV AVIF every card already writes, untagged as HDR."""
+    pytest.importorskip("av")
+    path = str(tmp_path / "a.avif")
+    write_image(a_gradient(64, 64), path, extension="avif", quality=90, color_space="sRGB")
+    probe = _ffprobe_stream(path)
+    assert not probe["pix_fmt"].startswith("yuv420p10")
+    assert probe["transfer"] not in (16, 18)
+
+
+def test_hdr_avif_pads_an_odd_edge(tmp_path):
+    pytest.importorskip("av")
+    path = str(tmp_path / "odd.avif")
+    write_image(a_gradient(33, 31), path, extension="avif", quality=90, color_space="HDR")
+    assert os.path.getsize(path) > 0
+
+
+@pytest.mark.parametrize("extension", ["png", "exr", "webp", "jpeg", "tiff"])
+def test_hdr_values_are_refused_where_the_format_cannot_say_hdr(tmp_path, extension):
+    with pytest.raises(RuntimeError, match="only AVIF carries HDR"):
+        write_image(a_gradient(), str(tmp_path / f"x.{extension}"), extension=extension, color_space="HDR")
+
+
+def test_hdr_avif_refuses_alpha_rather_than_dropping_it(tmp_path):
+    pytest.importorskip("av")
+    with pytest.raises(RuntimeError, match="alpha"):
+        write_image(
+            a_gradient(channels=3)[..., [0, 1, 2, 0]], str(tmp_path / "a.avif"),
+            extension="avif", color_space="HDR",
+        )
+
+
+def test_an_unknown_colour_space_raises(tmp_path):
+    with pytest.raises(RuntimeError, match="No such colour space"):
+        write_image(a_gradient(), str(tmp_path / "x.avif"), extension="avif", color_space="P3")

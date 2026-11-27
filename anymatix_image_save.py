@@ -7,7 +7,7 @@ import os
 import numpy as np
 import json
 
-from .anymatix_output_formats import IMAGE_EXTENSIONS, write_image
+from .anymatix_output_formats import COLOR_SPACES, IMAGE_EXTENSIONS, write_image
 from .anymatix_atomic_write import atomic_output
 
 
@@ -52,6 +52,10 @@ class Anymatix_Image_Save:
                 "bit_depth": ("INT", {"default": 8, "min": 8, "max": 16, "step": 8}),
                 "quality": ("INT", {"default": 100, "min": 1, "max": 100, "step": 1}),
                 "lossless_webp": (["false", "true"],),
+                # What the pixel values mean. Optional, sRGB by default, for
+                # the same reason as `bit_depth`: every card before HDR keeps
+                # its inputs and its bytes. Only AVIF writes HDR today.
+                "color_space": (COLOR_SPACES,),
             },
         }
 
@@ -77,6 +81,7 @@ class Anymatix_Image_Save:
         show_previews="true",
         save_json="false",
         bit_depth=8,
+        color_space="sRGB",
     ):
 
         delimiter = filename_delimiter
@@ -172,6 +177,7 @@ class Anymatix_Image_Save:
                 lossless_webp=lossless_webp,
                 bit_depth=bit_depth,
                 fast=fast_batch,
+                color_space=color_space,
             )
             if not fast_batch:
                 print(f"Image file saved to: {output_file}")

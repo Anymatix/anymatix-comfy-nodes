@@ -67,6 +67,21 @@ IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "tiff", "webp", "bmp", "exr", "
 #: Extensions that need OpenCV whatever the depth.
 _CV2_ONLY = ("exr", "avif")
 
+#: What the pixel values of the incoming IMAGE mean. `sRGB` is every card
+#: before HDR and stays the default, so an untouched card writes the bytes it
+#: always wrote. `HDR` is BT.2100 HLG on Rec.2020 primaries and `HDR PQ` is
+#: BT.2100 PQ on Rec.2020: the encodings ComfyUI's `ImageSDRToHDR` and
+#: `ImageColorSpace` produce, still 0..1 but no longer display sRGB.
+COLOR_SPACES = ["sRGB", "HDR", "HDR PQ"]
+
+#: The CICP code points an HDR AVIF declares (ITU-T H.273): primaries,
+#: transfer, matrix. Without them a viewer decodes the file as sRGB and the
+#: highlights the card made are drawn as a washed-out SDR picture.
+_AVIF_HDR_CICP = {
+    "HDR": {"primaries": 9, "transfer": 18, "matrix": 9},  # BT.2020, ARIB STD-B67 (HLG), BT.2020 NCL
+    "HDR PQ": {"primaries": 9, "transfer": 16, "matrix": 9},  # BT.2020, SMPTE ST 2084 (PQ), BT.2020 NCL
+}
+
 
 def srgb_to_linear(image):
     """
@@ -100,9 +115,14 @@ def write_image(
     lossless_webp=False,
     bit_depth=8,
     fast=False,
+    color_space="sRGB",
 ):
     """
     Write one frame, already float 0..1, in the format the rung asked for.
+
+    `color_space` says what those values mean (see `COLOR_SPACES`). Only AVIF
+    carries an HDR space today; any other format asked to write HDR values
+    raises, because writing them as if they were sRGB would mislabel the file.
 
     `image` is HxW, HxWx1, HxWx3 or HxWx4. `fast` trades compression for time
     and is set when a batch is large enough that the difference is felt; it
@@ -123,7 +143,9 @@ def write_image(
     """
     temp_path = temp_path_for(path)
     try:
-        _write_image_to(temp_path, image, extension, quality, lossless_webp, bit_depth, fast)
+        _write_image_to(
+            temp_path, image, extension, quality, lossless_webp, bit_depth, fast, color_space
+        )
         mark_file(temp_path, extension)
         sign_file(temp_path, extension)
         publish(temp_path, path)
@@ -132,9 +154,24 @@ def write_image(
         raise
 
 
-def _write_image_to(path, image, extension, quality, lossless_webp, bit_depth, fast):
+def _write_image_to(
+    path, image, extension, quality, lossless_webp, bit_depth, fast, color_space="sRGB"
+):
     image = np.asarray(image, dtype=np.float32)
     extension = extension.lower().lstrip(".")
+
+    if color_space not in COLOR_SPACES:
+        raise RuntimeError(
+            f"No such colour space: {color_space!r}. Known: {', '.join(COLOR_SPACES)}"
+        )
+    if color_space != "sRGB":
+        if extension != "avif":
+            raise RuntimeError(
+                f"`{extension}` cannot be written from {color_space} values yet; "
+                "only AVIF carries HDR. Writing them as sRGB would mislabel the file."
+            )
+        _write_hdr_avif(path, image, quality, color_space)
+        return
 
     if extension == "exr":
         _require_cv2("OpenEXR")
@@ -161,6 +198,90 @@ def _write_image_to(path, image, extension, quality, lossless_webp, bit_depth, f
         return
 
     _write_eight_bit(image, path, extension, quality, lossless_webp, fast)
+
+
+def _hdr_avif_crf(quality):
+    """
+    The AV1 rate factor for an AVIF quality. The renderer states quality as
+    1..100 for every lossy rung; AV1 counts the other way, 0..63. 90 maps to
+    18, the rate ComfyUI's own AVIF save uses by default.
+    """
+    quality = max(1, min(100, int(quality)))
+    return int(round(63 - 0.5 * quality))
+
+
+def _write_hdr_avif(path, image, quality, color_space):
+    """
+    A 10-bit 4:2:0 AVIF, with the HDR colour space DECLARED in the file.
+
+    OpenCV cannot write the CICP colour description, so this goes through
+    PyAV (already a dependency, and the library ComfyUI writes video with).
+    The values arrive already encoded in the HDR transfer (HLG or PQ): they
+    are quantised to 16 bits, converted to Y'CbCr with the BT.2020 matrix and
+    stored at 10 bits. No tone mapping and no transfer is applied here.
+
+    No alpha: the AV1 encoders PyAV ships do not encode it, and dropping it
+    without a word would be the silent downgrade this module refuses.
+    """
+    try:
+        import av
+    except ImportError as error:  # pragma: no cover - av is in requirements.txt
+        raise RuntimeError(
+            "HDR AVIF needs PyAV, and this build has none. "
+            "It is in requirements.txt: the install is incomplete."
+        ) from error
+
+    if image.ndim == 3 and image.shape[2] == 4:
+        raise RuntimeError("HDR AVIF has no alpha channel; the image has one.")
+    if image.ndim == 3 and image.shape[2] == 1:
+        image = image[:, :, 0]
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    height, width = image.shape[:2]
+    if height % 2 or width % 2:
+        # 4:2:0 halves the chroma; an odd edge is padded by repeating it.
+        image = np.pad(image, ((0, height % 2), (0, width % 2), (0, 0)), mode="edge")
+
+    cicp = _AVIF_HDR_CICP[color_space]
+    deep = _quantize(image, 16)
+    frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(deep), format="rgb48le")
+    frame = frame.reformat(format="yuv420p10le", dst_colorspace=cicp["matrix"])
+
+    last_error = None
+    for encoder in ("libsvtav1", "libaom-av1"):
+        try:
+            _encode_avif(av, path, frame, encoder, _hdr_avif_crf(quality), cicp)
+            return
+        except (av.error.FFmpegError, ValueError) as error:
+            last_error = error
+            if os.path.exists(path):
+                os.remove(path)
+    raise RuntimeError(
+        f"No AV1 encoder in this build could write the HDR AVIF: {last_error}"
+    )
+
+
+def _encode_avif(av, path, frame, encoder, crf, cicp):
+    with av.open(path, mode="w", format="avif") as container:
+        stream = container.add_stream(encoder, rate=1)
+        stream.width = frame.width
+        stream.height = frame.height
+        stream.pix_fmt = "yuv420p10le"
+        stream.options = {"crf": str(crf)}
+        context = stream.codec_context
+        context.color_primaries = cicp["primaries"]
+        context.color_trc = cicp["transfer"]
+        context.colorspace = cicp["matrix"]
+        context.color_range = 1  # limited ("MPEG") range, as the matrix expects
+        frame.color_primaries = cicp["primaries"]
+        frame.color_trc = cicp["transfer"]
+        frame.colorspace = cicp["matrix"]
+        frame.color_range = 1
+        frame.pts = 0
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
 
 
 def _quantize(image, bits):
