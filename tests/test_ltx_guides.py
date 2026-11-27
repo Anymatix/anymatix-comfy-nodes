@@ -92,6 +92,30 @@ def test_takes_more_than_any_fixed_count(calls):
     assert len(calls) == 40
 
 
+def test_a_key_with_its_own_strength_is_guided_with_it(calls):
+    pairs = [
+        {"image": "a.png", "frame": 0},
+        {"image": "b.png", "frame": 18, "strength": 0.25},
+        {"image": "c.png", "frame": 40, "strength": 1},
+        {"image": "d.png", "frame": 64},
+    ]
+    AnymatixAddGuides().add([], [], "vae", {"samples": 0}, json.dumps(pairs), 0.7)
+    # Each key only its own value, the node's own strength for a key with none; nothing between keys.
+    assert [c[2] for c in calls] == [0.7, 0.25, 1.0, 0.7]
+
+
+def test_parse_returns_the_strength_only_where_a_pair_has_one():
+    text = '[{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 9, "strength": 0.5}]'
+    assert parse_keyframes(text) == [("a.png", 0, None), ("b.png", 9, 0.5)]
+
+
+def test_input_types_are_unchanged():
+    types_ = AnymatixAddGuides.INPUT_TYPES()
+    assert list(types_["required"]) == ["positive", "negative", "vae", "latent", "keyframes", "strength"]
+    assert types_["required"]["strength"] == ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01})
+    assert list(types_["optional"]) == ["img_compression"]
+
+
 @pytest.mark.parametrize(
     "text,message",
     [
@@ -102,6 +126,10 @@ def test_takes_more_than_any_fixed_count(calls):
         ('[{"frame": 0}]', "keyframe 1 names no image"),
         ('[{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 1.5}]', "keyframe 2's frame"),
         ('[{"image": "a.png", "frame": true}]', "keyframe 1's frame"),
+        ('[{"image": "a.png", "frame": 0, "strength": "0.5"}]', "keyframe 1's strength"),
+        ('[{"image": "a.png", "frame": 0, "strength": true}]', "keyframe 1's strength"),
+        ('[{"image": "a.png", "frame": 0, "strength": null}]', "keyframe 1's strength"),
+        ('[{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 2, "strength": NaN}]', "keyframe 2's strength"),
     ],
 )
 def test_refuses_what_is_not_a_list_of_pairs(text, message):

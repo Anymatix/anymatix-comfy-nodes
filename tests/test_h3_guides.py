@@ -92,11 +92,21 @@ def test_takes_more_than_any_fixed_count(calls):
     assert len(calls) == 40
 
 
+def test_ignores_a_per_key_strength(calls):
+    with_strength = json.dumps([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 8, "strength": 0.3}])
+    (positive,) = AnymatixH3AddGuides().add([], {"samples": 0}, "vae", with_strength)
+    assert [c["frame"] for c in calls] == [0, 8]
+    assert [c["image"] for c in calls] == ["pixels of a.png", "pixels of b.png"]
+    assert positive == [0, 8]
+
+
 def test_refuses_what_the_ltx_node_refuses(calls):
     with pytest.raises(ValueError, match="non-empty list"):
         AnymatixH3AddGuides().add([], {"samples": 0}, "vae", "[]")
     with pytest.raises(ValueError, match="keyframe 2's frame"):
         AnymatixH3AddGuides().add([], {"samples": 0}, "vae", '[{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 1.5}]')
+    with pytest.raises(ValueError, match="keyframe 1's strength"):
+        AnymatixH3AddGuides().add([], {"samples": 0}, "vae", '[{"image": "a.png", "frame": 0, "strength": "x"}]')
     assert calls == []
 
 

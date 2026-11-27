@@ -13,7 +13,9 @@ How it differs from the LTX node, both from `MiniMaxH3AddGuide` itself:
 - an H3 guide changes only the positive conditioning (it records the keyframe
   under `minimax_keyframes`); the latent is read for its size, never written,
   so there is no negative and no latent output;
-- there is no strength.
+- there is no strength: `MiniMaxH3AddGuide` takes none, so a pair's optional
+  per-key `"strength"` (read by the shared parser for the LTX node) is ignored
+  here, and a list carrying one runs exactly as the same list without it.
 
 `skip` leaves out the first pairs. The measured whole-shot run (sh010, 18 keys,
 2026-11-27) sent the first key as `MiniMaxH3ImageToVideo`'s `first_frame` and
@@ -68,7 +70,7 @@ class AnymatixH3AddGuides:
         from nodes import LoadImage
 
         loader = LoadImage()
-        for image_name, frame in parse_keyframes(keyframes)[skip:]:
+        for image_name, frame, _strength in parse_keyframes(keyframes)[skip:]:
             image = loader.load_image(image_name)[0]
             positive = _positive(
                 MiniMaxH3AddGuide.execute(
@@ -89,7 +91,7 @@ class AnymatixH3AddGuides:
             pairs = parse_keyframes(keyframes)
         except ValueError as error:
             return str(error)
-        for image_name, _frame in pairs:
+        for image_name, _frame, _strength in pairs:
             if not folder_paths.exists_annotated_filepath(image_name):
                 return f"keyframe picture not on the machine: {image_name}"
         return True
