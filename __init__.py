@@ -53,6 +53,7 @@ from .fetch import model_file_is_spoken_for, sidecar_url_matches
 from .anymatix_image_save import Anymatix_Image_Save
 from .anymatix_maskimage import AnymatixMaskImage
 from .anymatix_image_to_video import AnymatixImageToVideo
+from .anymatix_load_image_batch import AnymatixLoadImageBatch
 from .anymatix_ltx_resize import AnymatixLTXResizeToClosestValidSize
 from .anymatix_ltx_guides import AnymatixAddGuides
 from .anymatix_media_length import AnymatixAudioDuration, AnymatixFrameCount
@@ -89,6 +90,7 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixControlNetLoader": AnymatixControlNetLoader,
     "AnymatixCLIPVisionLoader": AnymatixCLIPVisionLoader,
     "AnymatixImageToVideo": AnymatixImageToVideo,
+    "AnymatixLoadImageBatch": AnymatixLoadImageBatch,
     "AnymatixLTXResizeToClosestValidSize": AnymatixLTXResizeToClosestValidSize,
     "AnymatixAddGuides": AnymatixAddGuides,
     "AnymatixAudioDuration": AnymatixAudioDuration,
@@ -133,6 +135,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixControlNetLoader": "Anymatix ControlNet Loader",
     "AnymatixCLIPVisionLoader": "Anymatix CLIP Vision Loader",
     "AnymatixImageToVideo": "Anymatix Image To Video",
+    "AnymatixLoadImageBatch": "Anymatix Load Image Batch",
     "AnymatixLTXResizeToClosestValidSize": "Anymatix LTX Resize To Closest Valid Size",
     "AnymatixAddGuides": "Anymatix Add LTX Keyframe Guides",
     "AnymatixAudioDuration": "Anymatix Audio Duration",
