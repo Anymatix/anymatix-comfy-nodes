@@ -64,7 +64,6 @@ from .anymatix_mask2SAM import AnymatixMaskToSAMcoord
 from .anymatix_clipseg import AnymatixCLIPSeg
 from .anymatix_chatterbox_bridge import AnymatixChatterboxPackFromFetchedName
 from .anymatix_whisper import AnymatixWhisperTranscribe
-from .anymatix_code3d import AnymatixCode3D
 from .host_compute_metrics import sample_host_compute_metrics
 # fp8 checkpoints on Apple Silicon: MPS has no fp8 cast, so the weights are
 # decoded by table. A no-op on every machine without MPS.
@@ -118,7 +117,6 @@ NODE_CLASS_MAPPINGS = {
     "AnymatixSeedVR2LoadVAEModel": AnymatixSeedVR2LoadVAEModel,
     "AnymatixChatterboxPackFromFetchedName": AnymatixChatterboxPackFromFetchedName,
     "AnymatixWhisperTranscribe": AnymatixWhisperTranscribe,
-    "AnymatixCode3D": AnymatixCode3D,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -163,7 +161,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnymatixSeedVR2LoadVAEModel": "Anymatix SeedVR2 Load VAE Model",
     "AnymatixChatterboxPackFromFetchedName": "Anymatix Chatterbox pack (from fetcher)",
     "AnymatixWhisperTranscribe": "Anymatix Whisper Transcribe",
-    "AnymatixCode3D": "Anymatix 3D Code (GLSL)",
 }
 
 
